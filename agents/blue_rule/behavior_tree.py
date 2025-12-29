@@ -1,5 +1,6 @@
 import numpy as np
 from sim_core.maneuver_lib import ManeuverLibrary
+from agents.blue_rule.tactics import TacticsLibrary
 from utils.geometry import get_distance, normalize, body_to_earth, quat_to_euler
 
 # --- 基础节点类 ---
@@ -64,6 +65,44 @@ class CheckIncomingMissile(Node):
             
         return 'FAILURE'
 
+# --- 目标态势感知节点 ---
+
+class CheckEnemyContact(Node):
+    """感知：检查雷达视角内是否有敌机"""
+    def __init__(self, max_dist=50000.0):
+        self.max_dist = max_dist
+
+    def tick(self, agent, blackboard):
+        enemies = blackboard.get('enemies', [])
+        if not enemies:
+            return 'FAILURE'
+
+        my_vel_dir = normalize(agent.vel)
+        nearest_enemy = None
+        min_dist = float('inf')
+
+        for e in enemies:
+            if not e.is_active or e.team == agent.team:
+                continue
+            vec_to_enemy = e.pos - agent.pos
+            dist = np.linalg.norm(vec_to_enemy)
+            if dist > self.max_dist:
+                continue
+            los = normalize(vec_to_enemy)
+            cos_angle = np.dot(my_vel_dir, los)
+            if cos_angle < np.cos(agent.radar_angle):
+                continue
+            if dist < min_dist:
+                min_dist = dist
+                nearest_enemy = e
+
+        if nearest_enemy:
+            blackboard['contact_enemy'] = nearest_enemy
+            blackboard['contact_dist'] = min_dist
+            return 'SUCCESS'
+
+        return 'FAILURE'
+
 # --- 具体的战术动作节点 ---
 
 class ActionNotch(Node):
@@ -76,36 +115,39 @@ class ActionNotch(Node):
         if not threat:
             return 'FAILURE'
             
-        # 1. 计算导弹相对于我的方位
-        # 将导弹位置转到机体坐标系，或者简单通过叉乘判断左右
         vec_to_missile = threat.pos - agent.pos
-        
-        # 转换到机体坐标系需要逆旋转，这里用简单的 Cross Product 判断左右
-        # 获取机体的前向矢量 (Heading)
-        q = agent.dynamics.quat
         my_vel_dir = normalize(agent.vel)
-        
-        # 计算 Relative Vector
-        rel_vec = normalize(vec_to_missile)
-        
-        # 叉乘：(My_Vel) x (To_Missile)
-        # 结果的 Z 分量 > 0 表示导弹在左边，< 0 表示在右边
-        cross_z = my_vel_dir[0] * rel_vec[1] - my_vel_dir[1] * rel_vec[0]
-        
-        # 战术决策：
-        # 如果导弹在左边，我应该向左急转（迎头闪避）还是向右急转（摆脱）？
-        # 通常 Notch 是要让导弹矢量与速度矢量垂直。
-        # 如果导弹在左前方，向左转会迅速减小距离（危险）；向右转会拉大角度。
-        # 这里采用 High-G Break 逻辑：向着导弹来袭方向的“反侧”急转，或者向导弹方向急转迫使其过冲。
-        # 简化策略：导弹在哪边，就往哪边急转 (Break Into)，这在近距格斗中能迫使导弹过载饱和。
-        
-        if cross_z > 0: 
-            # 导弹在左 -> 向左急转 (Action 5: Break Left)
-            agent_action = ManeuverLibrary.ACTION_BREAK_LEFT
+        target_dir = TacticsLibrary.get_notch_vector(agent.pos, agent.vel, threat.pos)
+
+        cos_err = np.clip(np.dot(my_vel_dir, target_dir), -1.0, 1.0)
+        if np.degrees(np.arccos(cos_err)) < 10.0:
+            agent_action = ManeuverLibrary.ACTION_MAINTAIN
         else:
-            # 导弹在右 -> 向右急转 (Action 6: Break Right)
-            agent_action = ManeuverLibrary.ACTION_BREAK_RIGHT
+            cross_z = my_vel_dir[0] * target_dir[1] - my_vel_dir[1] * target_dir[0]
+            if cross_z > 0:
+                agent_action = ManeuverLibrary.ACTION_NOTCH_LEFT
+            else:
+                agent_action = ManeuverLibrary.ACTION_NOTCH_RIGHT
             
+        blackboard['output_action'] = agent_action
+        return 'SUCCESS'
+
+class ActionCrank(Node):
+    """动作：偏置机动 (Crank)"""
+    def tick(self, agent, blackboard):
+        contact = blackboard.get('contact_enemy')
+        if not contact:
+            return 'FAILURE'
+
+        my_vel_dir = normalize(agent.vel)
+        target_dir = TacticsLibrary.get_crank_vector(agent.pos, contact.pos, radar_fov_deg=55.0)
+        cross_z = my_vel_dir[0] * target_dir[1] - my_vel_dir[1] * target_dir[0]
+
+        if cross_z > 0:
+            agent_action = ManeuverLibrary.ACTION_CRANK_LEFT
+        else:
+            agent_action = ManeuverLibrary.ACTION_CRANK_RIGHT
+
         blackboard['output_action'] = agent_action
         return 'SUCCESS'
 
@@ -141,21 +183,31 @@ class BlueRuleAgent:
         # 构建行为树
         # 逻辑优先级：
         # 1. 如果有致命威胁 (15km内) -> 执行急转规避 (Notch/Break)
-        # 2. 否则 -> 巡航 (Patrol)
+        # 2. 如果发现敌机 -> 执行偏置机动 (Crank)
+        # 3. 否则 -> 巡航 (Patrol)
         self.behavior_tree = Selector([
             Sequence([
                 CheckIncomingMissile(danger_dist=15000.0),
                 ActionNotch()
             ]),
+            Sequence([
+                CheckEnemyContact(max_dist=50000.0),
+                ActionCrank()
+            ]),
             ActionPatrol()
         ])
 
-    def get_action(self, my_aircraft, all_missiles):
+    def get_action(self, my_aircraft, all_missiles, all_aircrafts=None):
         """
         主入口：输入状态，输出动作ID
         """
         # 清空上一帧的黑板，填入新数据
-        self.blackboard = {'missiles': all_missiles, 'output_action': 0}
+        enemies = all_aircrafts or []
+        self.blackboard = {
+            'missiles': all_missiles,
+            'enemies': enemies,
+            'output_action': 0
+        }
         
         # 运行行为树
         self.behavior_tree.tick(my_aircraft, self.blackboard)

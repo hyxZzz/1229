@@ -2,7 +2,7 @@ import numpy as np
 from sim_core.entities.base import Entity
 from sim_core.dynamics import FlightDynamics
 from sim_core.maneuver_lib import ManeuverLibrary
-from utils.geometry import euler_to_quat
+from utils.geometry import euler_to_quat, quat_to_euler
 
 class Aircraft(Entity):
     def __init__(self, uid, team, init_pos, init_vel, init_heading=0):
@@ -28,7 +28,7 @@ class Aircraft(Entity):
             return
             
         # 1. 动作转指令
-        curr_roll = self.dynamics.quat[0] # 简化获取roll
+        curr_roll = quat_to_euler(self.dynamics.quat)[0]
         cmd = self.maneuver_lib.get_action_cmd(action_id, curr_roll)
         
         # 2. 物理步进

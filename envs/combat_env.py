@@ -45,7 +45,7 @@ class CombatEnv_8v8:
             # 从 sim 中找到对应的实体对象
             aircraft = self.sim.get_entity(uid)
             if aircraft and aircraft.is_active:
-                act_id = agent.get_action(aircraft, self.sim.missiles)
+                act_id = agent.get_action(aircraft, self.sim.missiles, self.sim.aircrafts)
                 blue_actions[uid] = act_id
         
         # 2. 执行仿真步进 (红方 + 蓝方)
