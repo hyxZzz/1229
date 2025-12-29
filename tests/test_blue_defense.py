@@ -33,11 +33,11 @@ def test_blue_evasion():
     print(f"Blue Action Decision ID: {action_id}")
     
     # 4. 验证
-    # 导弹在左后方，BlueRule logic 应该检测到威胁，并输出 Break Left (5) 或 Break Right (6)
+    # 导弹在左后方，BlueRule logic 应该检测到威胁，并输出 Notch Left / Notch Right
     # 而不是 Action 0 (Maintain)
     
-    if action_id in [ManeuverLibrary.ACTION_BREAK_LEFT, ManeuverLibrary.ACTION_BREAK_RIGHT]:
-        print("✅ 测试通过：蓝方检测到导弹并执行了急转机动！")
+    if action_id in [ManeuverLibrary.ACTION_NOTCH_LEFT, ManeuverLibrary.ACTION_NOTCH_RIGHT]:
+        print("✅ 测试通过：蓝方检测到导弹并执行了切向机动！")
     elif action_id == ManeuverLibrary.ACTION_MAINTAIN:
         print("❌ 测试失败：蓝方还在巡航，无视了导弹威胁！")
     else:

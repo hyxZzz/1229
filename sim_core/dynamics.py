@@ -26,6 +26,29 @@ class FlightDynamics:
         self.K = 0.15        # 诱导阻力系数 (CD = CD0 + K * CL^2)
         self.max_thrust_sl = 120000.0 # 海平面最大推力 (N)
 
+    def _rotate_vector(self, vec, axis, angle):
+        axis = normalize(axis)
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        return (vec * cos_a +
+                np.cross(axis, vec) * sin_a +
+                axis * np.dot(axis, vec) * (1 - cos_a))
+
+    def _g_limits(self, speed, mach):
+        max_g_struct = 9.0
+        min_g_struct = -3.0
+
+        if speed < 120.0:
+            max_g_struct = 5.0
+        if speed < 80.0:
+            max_g_struct = 3.0
+            min_g_struct = 0.0
+
+        if mach > 1.2:
+            max_g_struct = max(7.0, max_g_struct - 2.0 * (mach - 1.2))
+
+        return min_g_struct, max_g_struct
+
     def get_atmos(self, altitude):
         """简化的标准大气模型"""
         if altitude < 0: altitude = 0
@@ -63,7 +86,11 @@ class FlightDynamics:
         roll_diff = target_roll - curr_roll
         d_roll = np.clip(roll_diff, -roll_rate * dt, roll_rate * dt)
         new_roll = curr_roll + d_roll
-        
+
+        target_pitch_rate = action_cmd.get('target_pitch_rate', 0.0)
+        pitch_rate_limit = np.deg2rad(20)
+        d_pitch = np.clip(target_pitch_rate, -pitch_rate_limit, pitch_rate_limit) * dt
+
         # 3. 计算升力与过载
         Q = 0.5 * rho * speed**2
         
@@ -76,8 +103,10 @@ class FlightDynamics:
             
         max_lift = CL_max * Q * self.S_wing
         max_g_aero = max_lift / (self.mass * G0)
-        
-        n = np.clip(target_n, -3.0, min(9.0, max_g_aero))
+
+        min_g_struct, max_g_struct = self._g_limits(speed, mach)
+        max_g_allowed = min(max_g_struct, max_g_aero)
+        n = np.clip(target_n, min_g_struct, max_g_allowed)
         
         lift = n * self.mass * G0
         CL = lift / (Q * self.S_wing + 1e-6)
@@ -119,12 +148,14 @@ class FlightDynamics:
         if np.linalg.norm(right_vec) < 1e-3: 
             right_vec = np.array([1, 0, 0])
         right_vec = normalize(right_vec)
+
+        v_norm_cmd = self._rotate_vector(v_norm, right_vec, d_pitch)
         
-        lift_up_vec = np.cross(right_vec, v_norm)
+        lift_up_vec = np.cross(right_vec, v_norm_cmd)
         
         lift_dir = lift_up_vec * np.cos(new_roll) + \
-                   np.cross(v_norm, lift_up_vec) * np.sin(new_roll) + \
-                   v_norm * np.dot(v_norm, lift_up_vec) * (1 - np.cos(new_roll))
+                   np.cross(v_norm_cmd, lift_up_vec) * np.sin(new_roll) + \
+                   v_norm_cmd * np.dot(v_norm_cmd, lift_up_vec) * (1 - np.cos(new_roll))
                    
         f_lift = lift * lift_dir
 

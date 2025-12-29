@@ -18,7 +18,7 @@ class RedPolicy(nn.Module):
         
         # 定义动作空间
         act_dims = {
-            'maneuver': 7, # 0-6
+            'maneuver': 19, # 0-18
             'target': 8    # 8 enemies (index 0-7), output dim will be 9
         }
         
