@@ -22,3 +22,21 @@ rewards:
   missile_replan_hit: 5.0
   tick_survival: 0.01    # 存活奖励
   win_threshold: 0       # 判定胜利所需的净胜分
+  search_bonus: 0.02     # 进入雷达范围后的索敌奖励
+  approach_scale: 0.001  # 朝向敌机的接敌速度奖励
+  too_far_penalty: -0.05 # 过远且背离敌机的惩罚
+  position_bonus: 0.05   # WEZ 内占位奖励
+  aim_bonus: 0.03        # 朝向目标的持续瞄准奖励
+  good_shot_bonus: 1.5   # 合理开火奖励
+  bad_shot_penalty: -0.5 # 乱射惩罚
+  missile_support_scale: 0.2 # 导弹接近目标的支援奖励
+  redundant_fire_penalty: -0.2 # 重复锁定同一目标开火惩罚
+
+engagement:
+  radar_range: 70000.0
+  engage_range: 50000.0
+  wez_min: 15000.0
+  wez_max: 35000.0
+  aim_cos: 0.85
+  shot_cos: 0.90
+  support_max_dist: 30000.0

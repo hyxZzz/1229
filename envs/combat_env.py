@@ -10,7 +10,7 @@ class CombatEnv_8v8:
         # 初始化核心组件
         self.sim = None
         self.obs_parser = ObservationParser()
-        self.reward_func = RewardFunction(team_id=0) # 红方奖励
+        self.reward_func = None
         
         # 蓝方规则智能体池
         self.blue_agents = {}
@@ -19,11 +19,16 @@ class CombatEnv_8v8:
             
         self.max_steps = self.cfg['max_steps']
         self.current_step = 0
+        self.reward_func = RewardFunction(
+            team_id=0,
+            reward_cfg=self.cfg.get("rewards", {}),
+            engage_cfg=self.cfg.get("engagement", {}),
+        ) # 红方奖励
 
     def reset(self):
         self.current_step = 0
         self.sim = Simulation() # 需要在 sim_core/simulation.py 中实现初始化逻辑
-        self.sim.reset_8v8()    # 初始化 8v8 布局
+        self.sim.reset_8v8(self.cfg.get("init_state", {}))    # 初始化 8v8 布局
         
         # 初始化蓝方规则 Agent
         self.blue_agents = {}
@@ -99,7 +104,7 @@ class CombatEnv_8v8:
             if e['type'] == 'KILL':
                 killer = self.sim.get_entity(e['killer'])
                 if killer and killer.team == 0:
-                    kill_reward_map[e['killer']] = 10.0 # 击杀奖励
+                    kill_reward_map[e['killer']] = self.cfg["rewards"].get("kill_bonus", 10.0)
         
         # 为每个红方智能体计算 Step 奖励
         active_reds = 0
@@ -111,7 +116,7 @@ class CombatEnv_8v8:
                     event_rew = kill_reward_map.get(p.uid, 0.0)
                     rewards[p.uid] = base_rew + event_rew
                 else:
-                    rewards[p.uid] = 0.0 # Dead
+                    rewards[p.uid] = self.cfg["rewards"].get("be_shot_penalty", -5.0) # Dead
         
         # 判定结束
         if active_reds == 0 or self.current_step >= self.max_steps:
@@ -122,8 +127,9 @@ class CombatEnv_8v8:
         if blue_alive == 0:
             dones["__all__"] = True
             # 给所有红方存活者加 50 分大奖
+            team_win_bonus = self.cfg["rewards"].get("team_win_bonus", 50.0)
             for uid in rewards:
-                rewards[uid] += 50.0
+                rewards[uid] += team_win_bonus
 
         return obs, rewards, dones, infos
 
