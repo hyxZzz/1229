@@ -33,7 +33,7 @@ class Simulation:
             center_offset = [
                 np.random.uniform(-2000.0, 2000.0),
                 np.random.uniform(-2000.0, 2000.0),
-                0.0,
+                np.random.uniform(-2000.0, 2000.0),
             ]
             pos_noise_range = 500.0
             heading_noise_deg = 15.0
@@ -62,7 +62,8 @@ class Simulation:
                 red_center[2] + pos_noise[2],
             ]
             heading = np.random.uniform(-heading_noise_rad, heading_noise_rad)
-            vel = [300 * np.cos(heading), 300 * np.sin(heading), 0] # Mach 0.9 向东
+            speed = np.random.uniform(280, 320) # 随机速度
+            vel = [speed * np.cos(heading), speed * np.sin(heading), 0]
             p = Aircraft(uid, 0, pos, vel, init_heading=heading)
             self.aircrafts.append(p)
             self.entity_map[uid] = p
@@ -79,7 +80,8 @@ class Simulation:
                 blue_center[2] + pos_noise[2],
             ]
             heading = np.pi + np.random.uniform(-heading_noise_rad, heading_noise_rad)
-            vel = [300 * np.cos(heading), 300 * np.sin(heading), 0] # Mach 0.9 向西
+            speed = np.random.uniform(280, 320) # 随机速度
+            vel = [speed * np.cos(heading), speed * np.sin(heading), 0]
             p = Aircraft(uid, 1, pos, vel, init_heading=heading) # 朝西
             self.aircrafts.append(p)
             self.entity_map[uid] = p

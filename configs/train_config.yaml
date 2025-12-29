@@ -4,12 +4,12 @@ train:
   steps_per_epoch: 4000  # 约等于 2-3 个完整回合
   batch_size: 4000
   
-  lr: 3.0e-4
+  lr: 1.0e-4
   gamma: 0.995           # 折扣因子
   lam: 0.95              # GAE lambda
   clip_ratio: 0.2
-  target_kl: 0.01
-  entropy_coef: 0.005    # 熵正则化
+  target_kl: 0.02
+  entropy_coef: 0.01    # 熵正则化
   train_iters: 10        # 每次采集后更新次数
   
   save_freq: 50          # 保存模型频率

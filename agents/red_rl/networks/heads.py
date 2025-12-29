@@ -21,6 +21,15 @@ class PolicyHead(nn.Module):
             nn.ReLU(),
             nn.Linear(64, action_dims['target'] + 1) # +1 for "No Fire"
         )
+        self.apply(self._init_weights)
+
+        
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            # 使用正交初始化，增益设为 0.01 (非常小)
+            # 这会让输出的 Logits 非常接近 0，从而使 Softmax 后的概率接近均匀分布
+            nn.init.orthogonal_(m.weight, gain=0.01)
+            nn.init.constant_(m.bias, 0)
         
     def forward(self, x, masking_info=None):  # <--- 修改这里：参数名必须是 masking_info
         """

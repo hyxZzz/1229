@@ -134,18 +134,20 @@ class RedTrainer:
             
             if all_done or timeout:
                 # 推理最后一步 Value 用于 GAE
-                # 同样的 Batch 处理
-                last_val_obs = {
-                    k: np.zeros_like(v)  # <--- 修改为这行：保持和 batch_obs 一样的形状
-                    for k, v in batch_obs.items()
-                }
-                # 如果是 timeout，用当前 obs 计算 value；如果是 done，value=0
                 if timeout and not all_done:
-                     for i, uid in enumerate(red_uids):
+                    # 构造这一帧所有存活/死亡 Agent 的 Obs Batch
+                    # 保持和循环开始处的 batch_obs 逻辑一致
+                    last_val_obs = {
+                        k: np.zeros((8, *v.shape), dtype=np.float32) 
+                        for k, v in list(obs_dict.values())[0].items()
+                    }
+                    for i, uid in enumerate(red_uids):
                         if uid in obs_dict:
                             for k in last_val_obs:
                                 last_val_obs[k][i] = obs_dict[uid][k]
-                     _, _, last_vals = self.policy.act(last_val_obs)
+                    
+                    # 放入 device 计算
+                    _, _, last_vals = self.policy.act(last_val_obs)
                 else:
                     last_vals = np.zeros(8)
                     

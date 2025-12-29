@@ -82,8 +82,11 @@ class RedPolicy(nn.Module):
         """
         # obs_dict 已经是 tensor (由 Buffer 处理)
         features = self.backbone(obs_dict)
+
+        # 提取mask
+        enemy_mask = obs_dict['enemies'][:, :, 6]
         
-        man_logits, tar_logits = self.actor(features)
+        man_logits, tar_logits = self.actor(features, masking_info=enemy_mask)
         v = self.critic(features).squeeze(-1)
         
         # 机动分布

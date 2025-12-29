@@ -7,61 +7,75 @@ class ObservationParser:
         self.max_enemies = max_enemies
         self.max_missiles = max_missiles
         
-        # 特征维度
-        # Self: [x, y, z, vx, vy, vz, roll, pitch, yaw, hp, missile_count] = 11
-        # Other Aircraft: [rel_x, rel_y, rel_z, rel_vx, rel_vy, rel_vz, is_alive] = 7
-        # Missile: [rel_x, rel_y, rel_z, rel_vx, rel_vy, rel_vz, is_locked_on_me] = 7
+        # 归一化常数定义 (基于 env_config.yaml)
+        # 地图范围 +/- 150,000 -> 设为 150,000
+        self.NORM_POS = 150000.0  
+        # 相对距离关注 100km (雷达范围) -> 设为 100,000 比较合适
+        self.NORM_REL_POS = 100000.0
+        # 高度上限 25,000 -> 设为 30,000
+        self.NORM_ALT = 30000.0
+        # 最大速度约 600m/s -> 设为 1000
+        self.NORM_VEL = 1000.0
         
     def get_obs(self, sim, agent):
         """
         为主视角 agent 生成观察向量
         """
-        # 1. 自身特征 (Global Norm 处理，防止数值过大)
+        # 1. 自身特征 (使用地图级归一化)
+        # Self: [x, y, z, vx, vy, vz, q0, q1, q2, q3, missile]
         self_state = np.array([
-            agent.pos[0] / 50000.0, agent.pos[1] / 50000.0, agent.pos[2] / 15000.0,
-            agent.vel[0] / 1000.0,  agent.vel[1] / 1000.0,  agent.vel[2] / 1000.0,
-            agent.dynamics.quat[0], agent.dynamics.quat[1], agent.dynamics.quat[2], agent.dynamics.quat[3],
+            agent.pos[0] / self.NORM_POS, 
+            agent.pos[1] / self.NORM_POS, 
+            agent.pos[2] / self.NORM_ALT,
+            agent.vel[0] / self.NORM_VEL,  
+            agent.vel[1] / self.NORM_VEL,  
+            agent.vel[2] / self.NORM_VEL,
+            agent.dynamics.quat[0], 
+            agent.dynamics.quat[1], 
+            agent.dynamics.quat[2], 
+            agent.dynamics.quat[3],
             agent.missile_count / 3.0
         ], dtype=np.float32)
 
-        # 2. 盟友特征 (Allies)
+        # 2. 盟友特征 (使用相对距离归一化)
         allies_feat = np.zeros((self.max_allies, 7), dtype=np.float32)
         idx = 0
         for other in sim.aircrafts:
             if other.team == agent.team and other.uid != agent.uid:
                 if idx >= self.max_allies: break
                 if other.is_active:
-                    rel_pos = (other.pos - agent.pos) / 50000.0
-                    rel_vel = (other.vel - agent.vel) / 1000.0
-                    allies_feat[idx] = [*rel_pos, *rel_vel, 1.0] # 1.0 is alive
+                    # 相对位置
+                    rel_pos = (other.pos - agent.pos) / self.NORM_REL_POS
+                    # 相对速度
+                    rel_vel = (other.vel - agent.vel) / self.NORM_VEL
+                    
+                    # 拼接: [rx, ry, rz, rvx, rvy, rvz, alive]
+                    allies_feat[idx] = [*rel_pos, *rel_vel, 1.0] 
                 idx += 1
         
-        # 3. 敌机特征 (Enemies)
+        # 3. 敌机特征
         enemies_feat = np.zeros((self.max_enemies, 7), dtype=np.float32)
         idx = 0
         for other in sim.aircrafts:
             if other.team != agent.team:
                 if idx >= self.max_enemies: break
                 if other.is_active:
-                    rel_pos = (other.pos - agent.pos) / 50000.0
-                    rel_vel = (other.vel - agent.vel) / 1000.0
+                    rel_pos = (other.pos - agent.pos) / self.NORM_REL_POS
+                    rel_vel = (other.vel - agent.vel) / self.NORM_VEL
                     enemies_feat[idx] = [*rel_pos, *rel_vel, 1.0]
                 idx += 1
 
-        # 4. 导弹特征 (Missiles)
+        # 4. 导弹特征
         missiles_feat = np.zeros((self.max_missiles, 7), dtype=np.float32)
         idx = 0
         for m in sim.missiles:
             if not m.is_active: continue
             if idx >= self.max_missiles: break
             
-            # 只关注：我对它的威胁(如果是敌方导弹) 或 它对我的支援(如果是友方)
-            # 这里简化：不仅看敌方导弹，也看友方导弹（避免重复攻击同一目标）
+            rel_pos = (m.pos - agent.pos) / self.NORM_REL_POS
+            rel_vel = (m.vel - agent.vel) / self.NORM_VEL
             
-            rel_pos = (m.pos - agent.pos) / 50000.0
-            rel_vel = (m.vel - agent.vel) / 1000.0
-            
-            # Feature: Is this missile attacking me?
+            # 是否在攻击我？
             is_attacking_me = 1.0 if (m.target and m.target.uid == agent.uid) else 0.0
             
             missiles_feat[idx] = [*rel_pos, *rel_vel, is_attacking_me]
