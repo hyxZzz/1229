@@ -5,11 +5,11 @@ train:
   batch_size: 4000
   
   lr: 3.0e-4
-  gamma: 0.99            # 折扣因子
+  gamma: 0.995           # 折扣因子
   lam: 0.95              # GAE lambda
   clip_ratio: 0.2
   target_kl: 0.01
-  entropy_coef: 0.01     # 熵正则化
+  entropy_coef: 0.005    # 熵正则化
   train_iters: 10        # 每次采集后更新次数
   
   save_freq: 50          # 保存模型频率

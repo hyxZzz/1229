@@ -11,19 +11,33 @@ class Simulation:
         self.dt = 0.05      # 物理步长
         self.time = 0.0
 
-    def reset_8v8(self):
+    def reset_8v8(self, init_state=None):
         """初始化标准的 8v8 对抗场景"""
         self.aircrafts = []
         self.missiles = []
         self.entity_map = {}
         self.time = 0.0
+
+        if init_state:
+            red_center = init_state.get("red_center", [-20000, 0, 8000])
+            blue_center = init_state.get("blue_center", [20000, 0, 8000])
+            spread_range = init_state.get("spread_range", 28000)
+            spacing = spread_range / max(1, (8 - 1))
+        else:
+            red_center = [-20000, 0, 8000]
+            blue_center = [20000, 0, 8000]
+            spacing = 4000
         
         # --- 红方 (Team 0) ---
         # 阵型：一字排开，间隔 4km，高度 8000m
         for i in range(8):
             uid = f"Red_{i}"
             # X=-50km (左侧), Y分散, Z=8000
-            pos = [-20000, (i - 3.5) * 4000, 8000] 
+            pos = [
+                red_center[0],
+                red_center[1] + (i - 3.5) * spacing,
+                red_center[2],
+            ]
             vel = [300, 0, 0] # Mach 0.9 向东
             p = Aircraft(uid, 0, pos, vel, init_heading=0)
             self.aircrafts.append(p)
@@ -34,7 +48,11 @@ class Simulation:
         for i in range(8):
             uid = f"Blue_{i}"
             # X=+50km (右侧), Y分散
-            pos = [20000, (i - 3.5) * 4000, 8000]
+            pos = [
+                blue_center[0],
+                blue_center[1] + (i - 3.5) * spacing,
+                blue_center[2],
+            ]
             vel = [-300, 0, 0] # Mach 0.9 向西
             p = Aircraft(uid, 1, pos, vel, init_heading=np.pi) # 朝西
             self.aircrafts.append(p)
