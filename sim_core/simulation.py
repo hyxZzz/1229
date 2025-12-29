@@ -23,23 +23,47 @@ class Simulation:
             blue_center = init_state.get("blue_center", [20000, 0, 8000])
             spread_range = init_state.get("spread_range", 28000)
             spacing = spread_range / max(1, (8 - 1))
+            center_offset = init_state.get("center_offset", [0.0, 0.0, 0.0])
+            pos_noise_range = init_state.get("pos_noise_range", 0.0)
+            heading_noise_deg = init_state.get("heading_noise_deg", 0.0)
         else:
             red_center = [-20000, 0, 8000]
             blue_center = [20000, 0, 8000]
             spacing = 4000
+            center_offset = [
+                np.random.uniform(-2000.0, 2000.0),
+                np.random.uniform(-2000.0, 2000.0),
+                0.0,
+            ]
+            pos_noise_range = 500.0
+            heading_noise_deg = 15.0
+
+        red_center = [
+            red_center[0] + center_offset[0],
+            red_center[1] + center_offset[1],
+            red_center[2] + center_offset[2],
+        ]
+        blue_center = [
+            blue_center[0] - center_offset[0],
+            blue_center[1] - center_offset[1],
+            blue_center[2] + center_offset[2],
+        ]
+        heading_noise_rad = np.deg2rad(heading_noise_deg)
         
         # --- 红方 (Team 0) ---
         # 阵型：一字排开，间隔 4km，高度 8000m
         for i in range(8):
             uid = f"Red_{i}"
             # X=-50km (左侧), Y分散, Z=8000
+            pos_noise = np.random.uniform(-pos_noise_range, pos_noise_range, 3)
             pos = [
-                red_center[0],
-                red_center[1] + (i - 3.5) * spacing,
-                red_center[2],
+                red_center[0] + pos_noise[0],
+                red_center[1] + (i - 3.5) * spacing + pos_noise[1],
+                red_center[2] + pos_noise[2],
             ]
-            vel = [300, 0, 0] # Mach 0.9 向东
-            p = Aircraft(uid, 0, pos, vel, init_heading=0)
+            heading = np.random.uniform(-heading_noise_rad, heading_noise_rad)
+            vel = [300 * np.cos(heading), 300 * np.sin(heading), 0] # Mach 0.9 向东
+            p = Aircraft(uid, 0, pos, vel, init_heading=heading)
             self.aircrafts.append(p)
             self.entity_map[uid] = p
             
@@ -48,13 +72,15 @@ class Simulation:
         for i in range(8):
             uid = f"Blue_{i}"
             # X=+50km (右侧), Y分散
+            pos_noise = np.random.uniform(-pos_noise_range, pos_noise_range, 3)
             pos = [
-                blue_center[0],
-                blue_center[1] + (i - 3.5) * spacing,
-                blue_center[2],
+                blue_center[0] + pos_noise[0],
+                blue_center[1] + (i - 3.5) * spacing + pos_noise[1],
+                blue_center[2] + pos_noise[2],
             ]
-            vel = [-300, 0, 0] # Mach 0.9 向西
-            p = Aircraft(uid, 1, pos, vel, init_heading=np.pi) # 朝西
+            heading = np.pi + np.random.uniform(-heading_noise_rad, heading_noise_rad)
+            vel = [300 * np.cos(heading), 300 * np.sin(heading), 0] # Mach 0.9 向西
+            p = Aircraft(uid, 1, pos, vel, init_heading=heading) # 朝西
             self.aircrafts.append(p)
             self.entity_map[uid] = p
             
