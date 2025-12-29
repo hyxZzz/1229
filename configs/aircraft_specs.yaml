@@ -1,0 +1,15 @@
+# 飞机物理性能
+performance:
+  max_mach: 2.2
+  min_speed_kmh: 250.0
+  max_g: 9.0
+  min_g: -3.0
+  max_roll_rate: 180.0   # deg/s
+  sea_level_thrust_weight: 1.1
+
+sensor:
+  radar_range: 80000.0   # 80km
+  radar_fov: 60.0        # +/- 60 degrees
+
+loadout:
+  missile_count: 3       # 初始挂载

@@ -1,0 +1,15 @@
+dynamics:
+  max_mach: 4.5
+  max_g: 40.0
+  boost_time: 10.0       # 动力段
+  drag_coeff: 0.2        # 滑行段阻力
+
+guidance:
+  pn_n: 4.0              # 比例导引系数
+  fov: 45.0              # 导引头视场
+  range_max: 60000.0     # 动力射程
+  nez: 20000.0           # 不可逃逸区
+
+replan:
+  enabled: true
+  min_speed_mach: 1.5    # 低于此速度无法重规划
