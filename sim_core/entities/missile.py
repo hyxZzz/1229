@@ -27,21 +27,21 @@ class Missile(Entity):
         # --- 2. 导引律参数 ---
         self.max_g = 40.0           # 最大过载 (G)
         self.N_pn = 4.0             # 比例导引系数
-        self.fov = np.deg2rad(60.0) # 导引头视场角
+        self.fov = np.deg2rad(90.0) # 导引头视场角
         
         # --- 3. 状态标志 ---
         self.lost_lock = False      # 是否丢失目标（供 Env 识别）
         self.max_speed = 1200.0     # 极速限制 (m/s) ~ Mach 4
         self.min_speed = 100.0      # 失速速度
-        self.seeker_memory = 2.0   # 目标丢失后的惯导记忆时间 (s)
-        self.terminal_range = 5000.0  # 末段强制追踪距离 (m)
+        self.seeker_memory = 5.0   # 目标丢失后的惯导记忆时间 (s)
+        self.terminal_range = 8000.0  # 末段强制追踪距离 (m)
         self.last_seen_pos = target.pos.copy()
         self.last_seen_vel = target.vel.copy()
         self.last_lock_time = 0.0
 
     def update(self, dt, enemies=None):
         """
-        :param enemies: 传入是为了兼容接口，实际不再内部自动重规划
+        :param enemies: 可选的敌机列表，用于丢失锁定后的重捕获
         """
         if not self.is_active: 
             return False, None
@@ -70,6 +70,34 @@ class Missile(Entity):
                 self.last_lock_time = self.time_alive
             else:
                 self.lost_lock = True
+
+        # 丢失锁定且超出记忆时间时，尝试重捕获最近目标
+        if (not target_valid) or (self.lost_lock and (self.time_alive - self.last_lock_time) > self.seeker_memory):
+            if enemies:
+                my_dir = normalize(self.vel)
+                best_target = None
+                best_dist = float('inf')
+                for enemy in enemies:
+                    if not enemy.is_active or enemy.team == self.team:
+                        continue
+                    vec_to_enemy = enemy.pos - self.pos
+                    dist = np.linalg.norm(vec_to_enemy)
+                    if dist < 1e-3:
+                        continue
+                    los = normalize(vec_to_enemy)
+                    angle = np.arccos(np.clip(np.dot(my_dir, los), -1, 1))
+                    if angle <= self.fov or dist <= self.terminal_range:
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_target = enemy
+                if best_target:
+                    self.target = best_target
+                    target_valid = True
+                    self.lost_lock = False
+                    self.last_seen_pos = best_target.pos.copy()
+                    self.last_seen_vel = best_target.vel.copy()
+                    self.last_lock_time = self.time_alive
+                    dist_to_target = np.linalg.norm(self.target.pos - self.pos)
 
         # 2. 计算动力 (Thrust)
         acc_thrust = 0.0
@@ -103,6 +131,16 @@ class Missile(Entity):
                 r_vec = guide_pos - self.pos
                 dist = np.linalg.norm(r_vec)
                 r_dir = r_vec / (dist + 1e-6)
+
+                v_rel = guide_vel - self.vel
+                vc = -np.dot(v_rel, r_dir)
+                closing_speed = max(100.0, vc)
+                lead_time = np.clip(dist / closing_speed, 0.0, 5.0)
+                lead_pos = guide_pos + guide_vel * lead_time
+
+                r_vec = lead_pos - self.pos
+                dist = np.linalg.norm(r_vec)
+                r_dir = r_vec / (dist + 1e-6)
                 
                 v_rel = guide_vel - self.vel
                 vc = -np.dot(v_rel, r_dir)
@@ -117,7 +155,7 @@ class Missile(Entity):
         
         # 4. 简化的空气阻力
         speed = np.linalg.norm(self.vel)
-        k_drag = 0.0002 
+        k_drag = 0.00015 
         drag_acc_mag = k_drag * speed**2
         acc_drag = -normalize(self.vel) * drag_acc_mag
 
@@ -172,7 +210,7 @@ class Missile(Entity):
                 return True, self.target.uid
                 
         # 7. 失效判定
-        if self.pos[2] < 0 or new_speed < self.min_speed or self.time_alive > 60.0:
+        if self.pos[2] < 0 or new_speed < self.min_speed or self.time_alive > 80.0:
             self.is_active = False
             
         return False, None
