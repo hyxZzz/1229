@@ -1,15 +1,24 @@
 import numpy as np
 from sim_core.entities.aircraft import Aircraft
 from sim_core.entities.missile import Missile
-from utils.geometry import get_distance
+from utils.geometry import get_distance, normalize
 
 class Simulation:
-    def __init__(self):
+    def __init__(self, engagement_cfg=None):
         self.aircrafts = [] # 所有的飞机
         self.missiles = []  # 所有的导弹
         self.entity_map = {} # uid -> entity
         self.dt = 0.05      # 物理步长
         self.time = 0.0
+        engagement_cfg = engagement_cfg or {}
+        self.wez_min = engagement_cfg.get("wez_min", 5000.0)
+        self.wez_max = engagement_cfg.get("wez_max", 35000.0)
+        if "shot_cos" in engagement_cfg:
+            self.wez_angle = np.arccos(np.clip(engagement_cfg["shot_cos"], -1.0, 1.0))
+        elif "aim_cos" in engagement_cfg:
+            self.wez_angle = np.arccos(np.clip(engagement_cfg["aim_cos"], -1.0, 1.0))
+        else:
+            self.wez_angle = np.deg2rad(engagement_cfg.get("wez_angle_deg", 30.0))
 
     def reset_8v8(self, init_state=None):
         """初始化标准的 8v8 对抗场景"""
@@ -135,12 +144,19 @@ class Simulation:
             if fire_target_uid and p.missile_count > 0:
                 target = self.get_entity(fire_target_uid)
                 if target and target.is_active:
-                    p.missile_count -= 1
-                    # 导弹UID命名: M_Red_0_1
-                    m_uid = f"M_{p.uid}_{3-p.missile_count}"
-                    new_missile = Missile(m_uid, p.team, p, target)
-                    self.missiles.append(new_missile)
-                    events.append({'type': 'FIRE', 'launcher': p.uid,'target': target.uid})
+                    vec_to_target = target.pos - p.pos
+                    dist = np.linalg.norm(vec_to_target)
+                    my_dir = normalize(p.vel)
+                    los = normalize(vec_to_target)
+                    angle = np.arccos(np.clip(np.dot(my_dir, los), -1, 1))
+                    is_in_wez = (self.wez_min < dist < self.wez_max) and (angle <= self.wez_angle)
+                    if is_in_wez:
+                        p.missile_count -= 1
+                        # 导弹UID命名: M_Red_0_1
+                        m_uid = f"M_{p.uid}_{3-p.missile_count}"
+                        new_missile = Missile(m_uid, p.team, p, target)
+                        self.missiles.append(new_missile)
+                        events.append({'type': 'FIRE', 'launcher': p.uid,'target': target.uid})
 
         # 2. 导弹更新
         # 收集所有活着的敌机作为潜在重规划目标

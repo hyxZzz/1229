@@ -27,7 +27,7 @@ class CombatEnv_8v8:
 
     def reset(self):
         self.current_step = 0
-        self.sim = Simulation()
+        self.sim = Simulation(engagement_cfg=self.cfg.get("engagement", {}))
         self.sim.reset_8v8(self.cfg.get("init_state", {}))
         
         self.blue_agents = {}
