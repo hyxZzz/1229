@@ -1,173 +1,104 @@
 import numpy as np
-from utils.geometry import quat_to_euler, body_to_earth, euler_to_quat, normalize
-
-# 常量定义
-G0 = 9.81              # 重力加速度 (m/s^2)
-R_EARTH = 6371000.0    # 地球半径 (m)
-RHO_SL = 1.225         # 海平面空气密度 (kg/m^3)
-SOUND_SPEED = 340.0    # 海平面音速 (m/s)
+from utils.geometry import quat_to_euler, euler_to_quat, normalize
 
 class FlightDynamics:
     def __init__(self, initial_pos, initial_vel, initial_quat):
         """
-        :param initial_pos: np.array [x, y, z] (z up)
-        :param initial_vel: np.array [vx, vy, vz] (Earth frame)
-        :param initial_quat: np.array [w, x, y, z]
+        简化版动力学：基于运动学 (Kinematics) 更新
         """
         self.pos = np.array(initial_pos, dtype=np.float64)
         self.vel = np.array(initial_vel, dtype=np.float64)
-        self.quat = np.array(initial_quat, dtype=np.float64) # Attitude quaternion
-        self.mass = 12000.0  # 假设质量 kg (F-16 class)
-        self.fuel = 3000.0   # 燃油 kg
+        self.quat = np.array(initial_quat, dtype=np.float64)
         
-        # 气动系数 (Parametric Model)
-        self.S_wing = 27.87  # 机翼面积 m^2
-        self.CD0 = 0.01      # 零升阻力系数
-        self.K = 0.15        # 诱导阻力系数 (CD = CD0 + K * CL^2)
-        self.max_thrust_sl = 120000.0 # 海平面最大推力 (N)
+        # 基础性能参数
+        self.min_speed = 50.0   # m/s
+        self.max_speed = 400.0  # m/s (约1.2马赫)
+        self.acc_rate = 15.0    # m/s^2 (加速率)
+        self.dec_rate = 10.0    # m/s^2 (减速率)
+        self.g0 = 9.81
+        
+        # 用于 ObservationParser 的兼容属性
+        self.mass = 10000.0 # 虚拟质量，仅用于兼容接口
 
-    def _rotate_vector(self, vec, axis, angle):
-        axis = normalize(axis)
-        cos_a = np.cos(angle)
-        sin_a = np.sin(angle)
-        return (vec * cos_a +
-                np.cross(axis, vec) * sin_a +
-                axis * np.dot(axis, vec) * (1 - cos_a))
-
-    def _g_limits(self, speed, mach):
-        max_g_struct = 9.0
-        min_g_struct = -3.0
-
-        if speed < 120.0:
-            max_g_struct = 5.0
-        if speed < 80.0:
-            max_g_struct = 3.0
-            min_g_struct = 0.0
-
-        if mach > 1.2:
-            max_g_struct = max(7.0, max_g_struct - 2.0 * (mach - 1.2))
-
-        return min_g_struct, max_g_struct
-
-    def get_atmos(self, altitude):
-        """简化的标准大气模型"""
-        if altitude < 0: altitude = 0
-        rho = RHO_SL * np.exp(-altitude / 9300.0) 
-        return rho
-
-    def get_mach(self, v_mag, altitude):
-        a = SOUND_SPEED * max(0.8, (1 - 2.25e-5 * altitude)) 
-        return v_mag / a
-
-    def step(self, action_cmd, dt=0.01):
+    def step(self, cmd, dt=0.05):
         """
-        核心积分步进
+        根据 maneuver_lib 的指令更新状态
+        cmd: {'acc_flag', 'target_g', 'target_roll', 'flag'}
         """
-        # 1. 提取状态
-        speed = np.linalg.norm(self.vel)
-        if speed < 1.0: speed = 1.0 
+        # 1. 提取指令
+        acc_flag = cmd['acc_flag']
+        target_g = cmd['target_g']
+        target_roll = cmd['target_roll']
         
-        # [核心修正] 失速判定 (Stall Logic)
-        # 防止 RL 利用低速物理漏洞悬停
-        is_stalled = False
-        if speed < 50.0: # 50 m/s (180 km/h) 为硬性失速线
-            is_stalled = True
-
-        altitude = self.pos[2]
-        rho = self.get_atmos(altitude)
-        mach = self.get_mach(speed, altitude)
+        # 2. 更新速度大小 (Speed)
+        current_speed = np.linalg.norm(self.vel)
+        if current_speed < 1e-3: current_speed = 1.0 # 防止除零
         
-        curr_rpy = quat_to_euler(self.quat)
-        curr_roll, curr_pitch, curr_yaw = curr_rpy
-
-        # 2. 控制响应
-        target_roll = np.clip(action_cmd['target_roll'], -np.pi, np.pi)
-        roll_rate = 3.0 
-        roll_diff = target_roll - curr_roll
-        d_roll = np.clip(roll_diff, -roll_rate * dt, roll_rate * dt)
-        new_roll = curr_roll + d_roll
-
-        target_pitch_rate = action_cmd.get('target_pitch_rate', 0.0)
-        pitch_rate_limit = np.deg2rad(20)
-        d_pitch = np.clip(target_pitch_rate, -pitch_rate_limit, pitch_rate_limit) * dt
-
-        # 3. 计算升力与过载
-        Q = 0.5 * rho * speed**2
-        
-        target_n = action_cmd['target_g']
-        
-        CL_max = 1.8 
-        # 如果失速，强制丧失升力
-        if is_stalled:
-            CL_max = 0.0
+        if acc_flag == 2:
+            current_speed += self.acc_rate * dt
+        elif acc_flag == -2:
+            current_speed -= self.dec_rate * dt
+        # acc_flag == 0 时，速度保持不变 (简化处理，忽略阻力减速)
             
-        max_lift = CL_max * Q * self.S_wing
-        max_g_aero = max_lift / (self.mass * G0)
-
-        min_g_struct, max_g_struct = self._g_limits(speed, mach)
-        max_g_allowed = min(max_g_struct, max_g_aero)
-        n = np.clip(target_n, min_g_struct, max_g_allowed)
+        current_speed = np.clip(current_speed, self.min_speed, self.max_speed)
         
-        lift = n * self.mass * G0
-        CL = lift / (Q * self.S_wing + 1e-6)
-
-        # 4. 计算阻力
-        wave_drag_factor = 1.0
-        if 0.9 < mach < 1.2:
-            wave_drag_factor = 1.0 + 2.0 * (mach - 0.9) 
+        # 3. 更新速度方向 (Velocity Direction)
+        # 核心逻辑：计算升力矢量带来的向心加速度
         
-        CD = (self.CD0 + self.K * (CL**2)) * wave_drag_factor
-        
-        # 失速时阻力激增
-        if is_stalled:
-            CD = 2.0 # 平板阻力
-            
-        drag = CD * Q * self.S_wing
-
-        # 5. 计算推力
-        throttle = np.clip(action_cmd['throttle'], 0.0, 1.0)
-        thrust_avail = self.max_thrust_sl * (rho / RHO_SL) * throttle
-        
-        # 6. 力学方程
-        v_norm = self.vel / speed
-        
-        # 简化的姿态处理
-        vel_pitch = np.arcsin(v_norm[2])
-        vel_yaw = np.arctan2(v_norm[1], v_norm[0])
-        
-        # 重力
-        fg = np.array([0, 0, -self.mass * G0])
-        
-        # 推力与阻力
-        f_thrust = thrust_avail * v_norm 
-        f_drag = -drag * v_norm
-        
-        # 升力方向计算
+        # A. 构建坐标系
+        v_norm = self.vel / np.linalg.norm(self.vel) # 前向矢量
         world_up = np.array([0, 0, 1])
-        right_vec = np.cross(v_norm, world_up)
-        if np.linalg.norm(right_vec) < 1e-3: 
-            right_vec = np.array([1, 0, 0])
-        right_vec = normalize(right_vec)
-
-        v_norm_cmd = self._rotate_vector(v_norm, right_vec, d_pitch)
         
-        lift_up_vec = np.cross(right_vec, v_norm_cmd)
+        # 右矢量 (水平面的右)
+        right = np.cross(v_norm, world_up)
+        if np.linalg.norm(right) < 1e-3: 
+            # 特殊情况：垂直爬升/俯冲时，右矢量暂定为 X 轴
+            right = np.array([1, 0, 0])
+        right = normalize(right)
         
-        lift_dir = lift_up_vec * np.cos(new_roll) + \
-                   np.cross(v_norm_cmd, lift_up_vec) * np.sin(new_roll) + \
-                   v_norm_cmd * np.dot(v_norm_cmd, lift_up_vec) * (1 - np.cos(new_roll))
-                   
-        f_lift = lift * lift_dir
-
-        f_total = f_thrust + f_drag + f_lift + fg
-        acc = f_total / self.mass
+        # 机体上矢量 (不考虑滚转时的"上")
+        body_up = np.cross(right, v_norm)
         
-        # 7. 积分
-        self.pos += self.vel * dt + 0.5 * acc * dt**2
-        self.vel += acc * dt
+        # B. 计算升力方向 (Lift Vector)
+        # 将 body_up 绕 v_norm 旋转 target_roll 角度
+        # Rodrigues' rotation formula 简化版
+        # lift_dir = body_up * cos(roll) + right * sin(roll)
+        sin_r = np.sin(target_roll)
+        cos_r = np.cos(target_roll)
+        lift_dir = normalize(body_up * cos_r + right * sin_r)
         
-        final_pitch = np.arcsin(normalize(self.vel)[2])
-        final_yaw = np.arctan2(self.vel[1], self.vel[0])
-        self.quat = euler_to_quat(new_roll, final_pitch, final_yaw)
+        # C. 计算合加速度矢量
+        # a_total = a_lift + a_gravity
+        # a_lift 大小 = n * g0
+        acc_lift = lift_dir * (target_g * self.g0)
+        acc_gravity = np.array([0, 0, -self.g0])
         
-        return self.pos, self.vel, speed, n
+        # 总加速度 (改变方向的部分)
+        # 注意：这里我们只用横向加速度来改变方向，切向加速度(加减速)已经在上面独立处理了
+        acc_turn = acc_lift + acc_gravity
+        
+        # 去除切向分量，只保留垂直于速度方向的分量 (纯改变方向)
+        # 这一步是为了防止重力导致额外的加速/减速，让 speed 控制权完全在 acc_flag 手里
+        acc_turn_perp = acc_turn - v_norm * np.dot(acc_turn, v_norm)
+        
+        # 4. 更新速度矢量
+        # v_new_dir = v_old_dir + (a_perp * dt) / speed
+        v_new_vec = self.vel + acc_turn_perp * dt
+        self.vel = normalize(v_new_vec) * current_speed
+        
+        # 5. 更新位置
+        self.pos += self.vel * dt
+        
+        # 6. 更新姿态 (Quaternion)
+        # 简化处理：姿态直接由速度矢量和滚转角决定
+        # Pitch/Yaw 来自速度矢量
+        pitch = np.arcsin(np.clip(self.vel[2] / current_speed, -1.0, 1.0))
+        yaw = np.arctan2(self.vel[1], self.vel[0])
+        
+        # Roll 直接使用指令值 (假设瞬间响应，或者您可以加一个平滑插值)
+        # 这里为了响应迅速，直接设为 target_roll
+        self.quat = euler_to_quat(target_roll, pitch, yaw)
+        
+        # 返回兼容旧接口的数据
+        # n (过载) 在这里就是 target_g
+        return self.pos, self.vel, current_speed, target_g

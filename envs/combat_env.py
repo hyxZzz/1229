@@ -1,135 +1,148 @@
 import numpy as np
 import yaml
+from utils.geometry import get_distance, normalize
 from sim_core.simulation import Simulation
 from envs.obs_parser import ObservationParser
 from envs.reward_func import RewardFunction
 from agents.blue_rule.behavior_tree import BlueRuleAgent
 
 class CombatEnv_8v8:
-    def __init__(self,config_path="configs/env_config.yaml"):
-        # 初始化核心组件
+    def __init__(self, config_path="configs/env_config.yaml"):
         self.sim = None
         self.obs_parser = ObservationParser()
         self.reward_func = None
-        
-        # 蓝方规则智能体池
         self.blue_agents = {}
+        
         with open(config_path, 'r', encoding='utf-8') as f:
             self.cfg = yaml.safe_load(f)
             
         self.max_steps = self.cfg['max_steps']
         self.current_step = 0
+        
+        # 初始化新的奖励函数
         self.reward_func = RewardFunction(
             team_id=0,
-            reward_cfg=self.cfg.get("rewards", {}),
-            engage_cfg=self.cfg.get("engagement", {}),
-        ) # 红方奖励
+            reward_cfg=self.cfg.get("rewards", {})
+        )
 
     def reset(self):
         self.current_step = 0
-        self.sim = Simulation() # 需要在 sim_core/simulation.py 中实现初始化逻辑
-        self.sim.reset_8v8(self.cfg.get("init_state", {}))    # 初始化 8v8 布局
+        self.sim = Simulation()
+        self.sim.reset_8v8(self.cfg.get("init_state", {}))
         
-        # 初始化蓝方规则 Agent
         self.blue_agents = {}
         for p in self.sim.aircrafts:
-            if p.team == 1: # Blue
+            if p.team == 1:
                 self.blue_agents[p.uid] = BlueRuleAgent(p.uid, p.team)
-                
         return self._get_all_observations()
 
     def step(self, red_actions):
         """
-        red_actions: Dict {uid: (action_id, fire_cmd_target_id)}
+        red_actions: {uid: {'maneuver': int, 'fire_target': target_uid}}
         """
         self.current_step += 1
         
-        # 1. 获取蓝方动作 (规则生成)
+        # --- 1. 预处理动作与重定向逻辑 ---
+        processed_red_actions = {}
+        redirection_events = [] 
+        
+        for uid, cmd in red_actions.items():
+            if not isinstance(cmd, dict):
+                processed_red_actions[uid] = cmd
+                continue
+                
+            maneuver_id = cmd.get('maneuver', 0)
+            target_uid = cmd.get('fire_target')
+            
+            processed_red_actions[uid] = {
+                'maneuver': maneuver_id,
+                'fire_target': target_uid 
+            }
+            
+            # 重定向判定 (Step 2 逻辑)
+            if target_uid:
+                my_missiles = [m for m in self.sim.missiles 
+                               if m.is_active and m.launcher_uid == uid]
+                lost_missiles = [m for m in my_missiles if m.lost_lock]
+                
+                if lost_missiles:
+                    missile_to_redirect = lost_missiles[0]
+                    target_entity = self.sim.get_entity(target_uid)
+                    
+                    if target_entity and target_entity.is_active:
+                        missile_to_redirect.target = target_entity
+                        missile_to_redirect.lost_lock = False
+                        
+                        redirection_events.append({
+                            'launcher': uid,
+                            'missile': missile_to_redirect.uid,
+                            'new_target': target_uid,
+                            'type': 'REDIRECT'
+                        })
+                        
+                        # 重定向了就不发射新弹
+                        processed_red_actions[uid]['fire_target'] = None
+        
+        # --- 2. 蓝方决策 ---
         blue_actions = {}
         for uid, agent in self.blue_agents.items():
-            # 从 sim 中找到对应的实体对象
             aircraft = self.sim.get_entity(uid)
             if aircraft and aircraft.is_active:
                 act_id = agent.get_action(aircraft, self.sim.missiles, self.sim.aircrafts)
                 blue_actions[uid] = act_id
         
-        # 2. 执行仿真步进 (红方 + 蓝方)
-        # 需要将 red_actions 和 blue_actions 合并传给 sim
-        events = self.sim.step(red_actions, blue_actions)
+        # --- 3. 仿真步进 ---
+        sim_events = self.sim.step(processed_red_actions, blue_actions)
         
-        # 3. 计算奖励与观察
-        obs = self._get_all_observations()
+        # --- 4. 合并事件 ---
+        all_events = sim_events + redirection_events
+        
+        # --- 5. 计算奖励 ---
         rewards = {}
+        for p in self.sim.aircrafts:
+            if p.team == 0:
+                # 即使 agent 死了，也要结算事件奖励
+                r = self.reward_func.get_reward(
+                    p, self.sim, processed_red_actions, all_events, redirection_events
+                )
+                rewards[p.uid] = r
+
+        # --- 6. 观测与结束判定 ---
+        obs = self._get_all_observations()
         dones = {"__all__": False}
-        infos = {}
+        infos = {"events": all_events} # 基础 info
 
-        red_speeds = []
-        red_dists = []
-        fires_this_step = 0
-
-        # 统计开火数
-        for e in events:
-            if e['type'] == 'FIRE':
-                launcher = self.sim.get_entity(e['launcher'])
-                if launcher and launcher.team == 0:
-                    fires_this_step += 1
-
-
-        # 统计物理状态
-        for p in self.sim.aircrafts:
-            if p.team == 0 and p.is_active:
-                # 1. 速度
-                speed = np.linalg.norm(p.vel)
-                red_speeds.append(speed)
-                
-                # 2. 距离最近敌人的距离
-                min_d = 200000.0
-                for enemy in self.sim.aircrafts:
-                    if enemy.team == 1 and enemy.is_active:
-                        d = np.linalg.norm(p.pos - enemy.pos)
-                        if d < min_d: min_d = d
-                if min_d < 190000: # 只有存在敌人才记录
-                    red_dists.append(min_d)
-
-        infos = {
-            "mean_speed": np.mean(red_speeds) if red_speeds else 0.0,
-            "mean_dist": np.mean(red_dists) if red_dists else 100000.0, # 默认100km
-            "fire_count": fires_this_step
-        }            
+        # === [核心修复] 补全 Trainer 所需的统计字段 ===
+        # 1. 开火统计
+        fire_count = sum(1 for e in all_events if e.get('type') == 'FIRE')
         
-        # 处理事件奖励 (击杀/被击杀)
-        # events 包含: [{'type': 'KILL', 'killer': uid, 'victim': uid}, ...]
-        kill_reward_map = {}
-        for e in events:
-            if e['type'] == 'KILL':
-                killer = self.sim.get_entity(e['killer'])
-                if killer and killer.team == 0:
-                    kill_reward_map[e['killer']] = self.cfg["rewards"].get("kill_bonus", 10.0)
+        # 2. 平均速度
+        red_active_vels = [np.linalg.norm(p.vel) for p in self.sim.aircrafts if p.team == 0 and p.is_active]
+        mean_speed = np.mean(red_active_vels) if red_active_vels else 0.0
         
-        # 为每个红方智能体计算 Step 奖励
-        active_reds = 0
-        for p in self.sim.aircrafts:
-            if p.team == 0: # Red
-                if p.is_active:
-                    active_reds += 1
-                    base_rew = self.reward_func.compute_reward(p, self.sim, red_actions)
-                    event_rew = kill_reward_map.get(p.uid, 0.0)
-                    rewards[p.uid] = base_rew + event_rew
-                else:
-                    rewards[p.uid] = self.cfg["rewards"].get("be_shot_penalty", -5.0) # Dead
-        
-        # 判定结束
-        if active_reds == 0 or self.current_step >= self.max_steps:
-            dones["__all__"] = True
+        # 3. 平均交战距离
+        red_pos = [p.pos for p in self.sim.aircrafts if p.team == 0 and p.is_active]
+        blue_pos = [p.pos for p in self.sim.aircrafts if p.team == 1 and p.is_active]
+        mean_dist = 0.0
+        if red_pos and blue_pos:
+            dists = []
+            for rp in red_pos:
+                for bp in blue_pos:
+                    dists.append(np.linalg.norm(rp - bp))
+            mean_dist = np.mean(dists) if dists else 0.0
             
-        # 检查蓝方是否全灭
-        blue_alive = sum([1 for p in self.sim.aircrafts if p.team == 1 and p.is_active])
-        if blue_alive == 0:
+        # 写入 infos
+        infos['mean_speed'] = mean_speed
+        infos['mean_dist'] = mean_dist
+        infos['fire_count'] = fire_count
+        # ==========================================
+
+        # 统计存活
+        red_alive = any(p.is_active for p in self.sim.aircrafts if p.team == 0)
+        blue_alive = any(p.is_active for p in self.sim.aircrafts if p.team == 1)
+        
+        if not red_alive or not blue_alive or self.current_step >= self.max_steps:
             dones["__all__"] = True
-            # 给所有红方存活者加 50 分大奖
-            team_win_bonus = self.cfg["rewards"].get("team_win_bonus", 50.0)
-            for uid in rewards:
-                rewards[uid] += team_win_bonus
 
         return obs, rewards, dones, infos
 

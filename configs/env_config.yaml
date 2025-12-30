@@ -1,52 +1,57 @@
 env_name: "DeepAirCombat_8v8_v1"
-max_steps: 4000          # 单回合最大步数 (对应 200秒)
+max_steps: 2000          # 单回合最大步数 (对应 200秒)
 dt: 0.05                 # 仿真步长
 
 # 地图边界 (米)
 map_size:
-  x: [-150000, 150000]
-  y: [-150000, 150000]
-  z: [0, 25000]
+  x: [-80000, 80000]
+  y: [-80000, 80000]
+  z: [0, 20000]
 
 # 初始设置
 init_state:
-  red_center: [-40000, 0, 8000]
-  blue_center: [40000, 0, 8000]
-  spread_range: 8000     # 编队散布范围
+  red_center: [-20000, 0, 8000]
+  blue_center: [20000, 0, 8000]
+  spread_range: 25000     # 编队散布范围
+  pos_noise_range: 2000.0
+  heading_noise_deg: 20.0 # 增加朝向随机性
 
 # 奖励系数 (关键调整)
 rewards:
-  kill_bonus: 10.0       # 击杀奖励
+  kill_bonus: 100.0       # 击杀奖励
   team_win_bonus: 50.0   # 胜利奖励
-  be_shot_penalty: -5.0  # 死亡惩罚
+  be_shot_penalty: -10.0  # 死亡惩罚
   missile_replan_hit: 5.0 # 导弹重规划命中奖励
   
   tick_survival: 0.01    # 存活奖励
+  approach_bonus_scale: 0.005
+  angle_bonus_scale: 0.05
+  energy_advantage_bonus: 0.02
+  lock_bonus: 0.1
   
   # --- 移动策略相关 ---
-  search_bonus: 0.0      # 关闭索敌奖励，避免在这个距离徘徊
-  approach_scale: 0.5    # [提高] 鼓励快速接敌
-  too_far_penalty: -0.05 # 过远惩罚
+  search_bonus: 0.0      
+  approach_scale: 0.5    
+  too_far_penalty: -0.1 
   
-  aim_bonus: 0.05        # 瞄准奖励
-  position_bonus: 0.2    # [关键] WEZ内占位奖励：每步+0.2 (相当于+4分/秒)，强吸引力
+  aim_bonus: 0.05        
+  position_bonus: 0.2    
   
   # --- 射击策略相关 ---
-  good_shot_bonus: 3.0   # [关键] 完美开火的大奖
-  bad_shot_penalty: -2.0 # [关键] 乱射重罚！迫使Agent谨慎开火
-  redundant_fire_penalty: -1.0 # 避免连发浪费弹药
+  good_shot_bonus: 5.0   # [提高] 鼓励完美射击
+  bad_shot_penalty: -10.0 # [大幅提高] 乱射重罚！让Agent学会珍惜弹药
+  redundant_fire_penalty: -15.0 # 集火惩罚
   
-  missile_support_scale: 0.0 # 代码中使用了固定值 0.005
+  missile_support_scale: 0.0
 
 # 交战规则参数
 engagement:
-  radar_range: 70000.0
-  engage_range: 50000.0
+  radar_range: 60000.0
+  engage_range: 45000.0
   
-  # [调整] 收缩 WEZ，让“好位置”更难得，从而更有价值
-  wez_min: 10000.0       # 10km (太近容易撞)
-  wez_max: 40000.0       # 40km (保证命中率)
+  wez_min: 3000.0       
+  wez_max: 35000.0       
   
-  aim_cos: 0.85          # 瞄准奖励的角度宽容度 (约30度)
-  shot_cos: 0.95         # [关键] 射击角度严格限制 (约18度以内)，迫使精准占位
+  aim_cos: 0.85
+  shot_cos: 0.94
   support_max_dist: 30000.0

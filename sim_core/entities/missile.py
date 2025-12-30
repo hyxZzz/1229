@@ -1,6 +1,6 @@
 import numpy as np
 from sim_core.entities.base import Entity
-from utils.geometry import get_distance, get_vector, normalize
+from utils.geometry import get_distance, normalize
 
 class Missile(Entity):
     def __init__(self, uid, team, launcher, target):
@@ -8,112 +8,147 @@ class Missile(Entity):
         self.launcher_uid = launcher.uid
         self.target = target 
         
+        # 初始状态继承自载机
         self.pos = launcher.pos.copy()
         launch_dir = normalize(launcher.vel)
+        # 初始速度：载机速度 + 弹射初速
         self.vel = launcher.vel + launch_dir * 50.0 
         
-        # --- 性能参数微调 ---
-        self.max_speed = 1500.0 
-        self.thrust = 60000.0    # 保持大推力，保证启动快
-        self.burn_time = 8.0     # [修改] 缩短动力时间，模拟燃料耗尽后的滑行
+        # --- 1. 动力阶段参数 ---
         self.time_alive = 0.0
-        self.turn_rate_max = np.deg2rad(40.0) 
-        self.fov = np.deg2rad(60.0) 
+        self.boost_time = 3.0       # 助推阶段 (s)
+        self.sustain_time = 10.0    # 续航阶段 (s) (结束时间 T=13s)
         
-        self.N_pn = 4.0 
-        self.state = "Boost" 
-
-    def replan(self, enemies):
-        best_target = None
-        min_cost = float('inf')
-        my_dir = normalize(self.vel)
+        self.boost_thrust = 150.0   # 助推加速度 (m/s^2) ~15G
+        self.sustain_thrust = 50.0  # 续航加速度 (m/s^2) ~5G
         
-        for enemy in enemies:
-            if not enemy.is_active: continue
-            dist = get_distance(self.pos, enemy.pos)
-            if dist > 30000: continue
-            
-            vec_to_enemy = normalize(enemy.pos - self.pos)
-            angle = np.arccos(np.clip(np.dot(my_dir, vec_to_enemy), -1, 1))
-            if angle > self.fov: continue
-            
-            cost = dist + angle * 5000 
-            if cost < min_cost:
-                min_cost = cost
-                best_target = enemy
-                
-        if best_target:
-            self.target = best_target
-            return True
-        else:
-            self.is_active = False
-            return False
+        self.current_stage = "Boost" 
+        
+        # --- 2. 导引律参数 ---
+        self.max_g = 40.0           # 最大过载 (G)
+        self.N_pn = 4.0             # 比例导引系数
+        self.fov = np.deg2rad(60.0) # 导引头视场角
+        
+        # --- 3. 状态标志 ---
+        self.lost_lock = False      # 是否丢失目标（供 Env 识别）
+        self.max_speed = 1200.0     # 极速限制 (m/s) ~ Mach 4
+        self.min_speed = 100.0      # 失速速度
 
-    def update(self, dt, enemies):
-        if not self.is_active: return False, None
+    def update(self, dt, enemies=None):
+        """
+        :param enemies: 传入是为了兼容接口，实际不再内部自动重规划
+        """
+        if not self.is_active: 
+            return False, None
+            
         self.time_alive += dt
         
-        if not self.target.is_active:
-            if not self.replan(enemies):
-                self.is_active = False
-                return False, None
-
-        r_vec = self.target.pos - self.pos
-        dist = np.linalg.norm(r_vec)
-        v_rel = self.target.vel - self.vel
-        omega_vec = np.cross(r_vec, v_rel) / (dist**2 + 1e-6)
+        # 记录上一帧位置，用于防穿模检测
+        prev_pos = self.pos.copy()
         
-        acc_cmd_vec = np.cross(omega_vec, self.vel)
-        acc_cmd_dir = normalize(acc_cmd_vec)
-        if np.linalg.norm(acc_cmd_vec) < 1e-3: acc_cmd_dir = np.zeros(3)
-
-        effective_vc = max(100.0, -np.dot(v_rel, r_vec/(dist+1e-6))) 
-        acc_magnitude = self.N_pn * effective_vc * np.linalg.norm(omega_vec)
-        acc_guidance = acc_magnitude * acc_cmd_dir
-
-        gravity_comp = np.array([0, 0, 9.81])
-        max_acc = 40.0 * 9.81
-        
-        total_cmd_acc = acc_guidance + gravity_comp
-        if np.linalg.norm(total_cmd_acc) > max_acc:
-            total_cmd_acc = normalize(total_cmd_acc) * max_acc
-
-        thrust_vec = np.zeros(3)
-        # [逻辑] 只有在动力时间内才有推力
-        if self.time_alive < self.burn_time:
-            thrust_vec = normalize(self.vel) * (self.thrust / 200.0) 
-            self.state = "Boost"
+        # 1. 目标有效性检查
+        if self.target is None or (not self.target.is_active):
+            self.lost_lock = True
         else:
-            self.state = "Coast" # 滑行段
-            
-        # [修改] 阻力系数微调
-        v_mag = np.linalg.norm(self.vel)
-        current_g = np.linalg.norm(total_cmd_acc) / 9.81
-        
-        # 基础阻力增大 (限制极速)
-        cd0 = 0.001 
-        # 诱导阻力增大 (加大机动惩罚)
-        k_induced = 0.0001 
-        
-        cd_total = cd0 + k_induced * (current_g ** 2)
-        
-        # 阻力计算
-        drag_acc = cd_total * (v_mag ** 2) * 0.01
-        drag_vec = -normalize(self.vel) * drag_acc
-        
-        real_gravity = np.array([0, 0, -9.81])
-        final_acc = total_cmd_acc + thrust_vec + drag_vec + real_gravity
-        
-        self.vel += final_acc * dt
-        self.pos += self.vel * dt
+            # 检查视场角 (FOV)
+            my_dir = normalize(self.vel)
+            vec_to_target = normalize(self.target.pos - self.pos)
+            angle = np.arccos(np.clip(np.dot(my_dir, vec_to_target), -1, 1))
+            if angle > self.fov:
+                self.lost_lock = True
+            else:
+                self.lost_lock = False
 
-        if dist < max(150.0, v_mag * dt) and self.time_alive > 0.5:
-            self.is_active = False
-            self.target.hp -= 100
-            self.target.is_active = False
-            return True, self.target.uid
+        # 2. 计算动力 (Thrust)
+        acc_thrust = 0.0
+        if self.time_alive < self.boost_time:
+            self.current_stage = "Boost"
+            acc_thrust = self.boost_thrust
+        elif self.time_alive < (self.boost_time + self.sustain_time):
+            self.current_stage = "Sustain"
+            acc_thrust = self.sustain_thrust
+        else:
+            self.current_stage = "Coast"
+            acc_thrust = 0.0 
             
-        if self.pos[2] < 0 or v_mag < 100:
+        # 3. 计算导引过载 (Guidance Load)
+        acc_guide = np.zeros(3)
+        
+        if not self.lost_lock:
+            # === 比例导引 (PN) ===
+            r_vec = self.target.pos - self.pos
+            dist = np.linalg.norm(r_vec)
+            r_dir = r_vec / (dist + 1e-6)
+            
+            v_rel = self.target.vel - self.vel
+            vc = -np.dot(v_rel, r_dir)
+            omega = np.cross(r_vec, v_rel) / (dist**2 + 1e-6)
+            
+            acc_magnitude = self.N_pn * vc * np.linalg.norm(omega)
+            acc_magnitude = np.clip(acc_magnitude, -self.max_g * 9.81, self.max_g * 9.81)
+            
+            cmd_vec = np.cross(omega, self.vel)
+            if np.linalg.norm(cmd_vec) > 1e-3:
+                acc_guide = normalize(cmd_vec) * acc_magnitude
+        
+        # 4. 简化的空气阻力
+        speed = np.linalg.norm(self.vel)
+        k_drag = 0.0002 
+        drag_acc_mag = k_drag * speed**2
+        acc_drag = -normalize(self.vel) * drag_acc_mag
+
+        # 5. 运动学积分
+        acc_total = normalize(self.vel) * acc_thrust + acc_drag + acc_guide
+        
+        self.vel += acc_total * dt
+        self.pos += self.vel * dt
+        
+        # 速度限制
+        new_speed = np.linalg.norm(self.vel)
+        if new_speed > self.max_speed:
+            self.vel = normalize(self.vel) * self.max_speed
+            
+        # 6. 命中判定 (修复版：射线检测防止穿模)
+        if not self.lost_lock:
+            # A. 计算当前距离
+            dist = np.linalg.norm(self.target.pos - self.pos)
+            
+            # B. 射线/线段检测
+            # 计算这一步飞行的向量: P_prev -> P_curr
+            flight_vec = self.pos - prev_pos
+            flight_dist_sq = np.dot(flight_vec, flight_vec)
+            
+            is_hit = False
+            
+            if flight_dist_sq < 1e-6:
+                # 几乎没动，直接用点距离判断
+                if dist < 30.0: is_hit = True
+            else:
+                # 计算目标点到飞行线段的投影
+                # 向量 P_prev -> Target
+                to_target_vec = self.target.pos - prev_pos
+                
+                # 投影系数 t (0 ~ 1) 表示最近点在线段上的位置
+                t = np.dot(to_target_vec, flight_vec) / flight_dist_sq
+                t = np.clip(t, 0.0, 1.0)
+                
+                # 线段上离目标最近的点
+                closest_point = prev_pos + flight_vec * t
+                
+                # 计算目标到该最近点的距离
+                segment_dist = np.linalg.norm(self.target.pos - closest_point)
+                
+                if segment_dist < 30.0:
+                    is_hit = True
+
+            if is_hit:
+                self.is_active = False
+                self.target.hp -= 100 # 击毁
+                self.target.is_active = False
+                return True, self.target.uid
+                
+        # 7. 失效判定
+        if self.pos[2] < 0 or new_speed < self.min_speed or self.time_alive > 60.0:
             self.is_active = False
             
         return False, None

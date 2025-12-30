@@ -16,14 +16,12 @@ def main():
     
     # 配置参数
     yaml_cfg = load_config("configs/train_config.yaml")
-    config = yaml_cfg['train'] # 获取 'train' 节点下的参数
+    config = yaml_cfg['train']
     
-    # 允许命令行参数覆盖 YAML 参数 (可选)
+    # 允许命令行参数覆盖 YAML 参数
     if args.steps:
         config['steps_per_epoch'] = args.steps
 
-    trainer = RedTrainer(config)
-    
     # 创建保存目录
     if not os.path.exists('./checkpoints'):
         os.makedirs('./checkpoints')
@@ -38,16 +36,17 @@ def main():
         trainer.collect_rollouts()
         
         # 2. 更新网络
-        loss_pi, loss_v, entropy = trainer.update()
+        # [修改] 接收 4 个返回值
+        loss_pi, loss_v, kl, entropy = trainer.update()
         
         # 3. 日志打印
-        if epoch % 10 == 0:
+        if epoch % 1 == 0: # 每个 epoch 都打印
             elapsed = time.time() - start_time
             print(f"Epoch {epoch} | Time {elapsed:.0f}s | "
-                  f"LossPi {loss_pi:.4f} | LossV {loss_v:.4f} | Entropy {entropy:.4f}")
+                  f"LossPi {loss_pi:.4f} | LossV {loss_v:.4f} | KL {kl:.4f} | Entropy {entropy:.4f}")
             
         # 4. 定期保存
-        if epoch % 50 == 0:
+        if epoch % 10 == 0:
             trainer.save_model(f"./checkpoints/model_epoch_{epoch}.pt")
 
 if __name__ == "__main__":

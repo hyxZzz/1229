@@ -36,7 +36,7 @@ def test_replan_and_energy():
     speed_log = []
     
     dt = 0.05
-    max_steps = 300 # 15秒
+    max_steps = 400 
     
     target_killed = False
     

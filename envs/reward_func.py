@@ -2,136 +2,157 @@ import numpy as np
 from utils.geometry import get_distance, normalize
 
 class RewardFunction:
-    def __init__(self, team_id, reward_cfg=None, engage_cfg=None):
+    def __init__(self, team_id, reward_cfg=None):
         self.team_id = team_id
-        # 默认奖励参数 (会被传入的配置覆盖)
-        self.reward_cfg = {
-            "tick_survival": 0.01,
-            "search_bonus": 0.0,
-            "approach_scale": 0.5,       # 加大接近奖励系数
-            "too_far_penalty": -0.05,
-            "position_bonus": 0.2,       # 核心：高额的占位奖励
-            "aim_bonus": 0.05,
-            "good_shot_bonus": 3.0,      # 核心：高质量射击大奖
-            "bad_shot_penalty": -2.0,    # 核心：乱射重罚
-            "missile_support_scale": 0.0,
-            "redundant_fire_penalty": -1.0,
-            "be_shot_penalty": -5.0,
+        # === [修改] 调整后的奖励参数，防止 Reward Hacking ===
+        self.cfg = {
+            # --- 1. 态势奖励 (大幅削弱，仅作微弱引导) ---
+            # 原值 0.05 -> 现值 0.002。
+            # 即使保持完美占位 2000 步，总分仅 4.0 分，远低于击杀分。
+            "align_bonus": 0.002,        # 角度优势 (指向敌机)
+            "dist_bonus": 0.002,         # 距离优势 (处于最佳射程)
+            "height_bonus": 0.001,       # 高度优势 (能量储备)
+            
+            # --- 2. 动作奖励 (鼓励果断开火) ---
+            # 完美发射奖励 2.0 -> 5.0，抵消乱射的负面影响，鼓励 Agent 在 WEZ 内尝试
+            "valid_shot_bonus": 5.0,     # 完美发射奖励
+            "invalid_shot_penalty": -2.0,# 乱射惩罚 (距离过远/角度过大)
+            "redirect_bonus": 1.0,       # 成功重定向导弹奖励
+            
+            # --- 3. 结果奖励 (核心驱动力) ---
+            # 击杀奖励 10.0 -> 100.0
+            # 只要拿到一个人头，收益就远超整场比赛“伴飞”的收益。
+            "kill_bonus": 100.0,         # 击杀奖励
+            "be_shot_penalty": -10.0,    # 被击杀惩罚
+            "crash_penalty": -20.0,      # [修改] 加大撞地/出界惩罚，防止为了追击而坠机
+            
+            # --- 4. [新增] 时间惩罚 ---
+            # 每存活一步扣 0.01 分，迫使 Agent 追求快速胜利，而不是拖时间刷分
+            "tick_penalty": -0.01,
+
+            # --- 5. 阈值参数 (保持不变) ---
+            "wez_max": 35000.0,          # 最大有效射程
+            "wez_min": 5000.0,           # 最小安全距离
+            "wez_angle": np.deg2rad(30), # 最大发射偏角
+            "optimal_dist": 20000.0,     # 期望的最佳交战距离
         }
         if reward_cfg:
-            self.reward_cfg.update(reward_cfg)
-            
-        # 默认交战参数
-        self.engage_cfg = {
-            "radar_range": 70000.0,
-            "engage_range": 50000.0,
-            "wez_min": 10000.0,
-            "wez_max": 40000.0,
-            "aim_cos": 0.85,
-            "shot_cos": 0.95,            # 射击角度要求更严格
-            "support_max_dist": 30000.0,
-        }
-        if engage_cfg:
-            self.engage_cfg.update(engage_cfg)
-        
-    def compute_reward(self, agent, sim, action_dict):
-        """
-        修正后的奖励函数：强力引导“先占位后开火”策略
-        """
-        reward = 0.0
-        
-        # 1. 存活与死亡处理
-        if not agent.is_active:
-            return self.reward_cfg["be_shot_penalty"]
-        reward += self.reward_cfg["tick_survival"]
+            self.cfg.update(reward_cfg)
 
-        # 2. 获取所有敌机信息
+    def get_reward(self, agent, sim, action_dict, events, redirection_events):
+        """
+        计算单步总奖励
+        """
+        # 0. 死亡/非活跃判定
+        if not agent.is_active:
+            # 检查是否刚刚死亡 (在 events 列表里)
+            for e in events:
+                # 撞地或出界
+                if e['type'] == 'CRASH' and e['uid'] == agent.uid:
+                    return self.cfg['crash_penalty']
+                # 被击落 (被害者是我)
+                if e['type'] == 'KILL' and e['victim'] == agent.uid:
+                    return self.cfg['be_shot_penalty']
+            return 0.0
+
+        total_reward = 0.0
+        
+        # === [新增] 1. 时间/生存惩罚 (Tick Penalty) ===
+        # 只要活着每一步都扣分，除非能拿到正向奖励抵消
+        total_reward += self.cfg['tick_penalty']
+        
+        # --- 2. 计算态势奖励 (Positional Reward) ---
+        # 这里的权重已经被大幅降低
+        total_reward += self._calc_position_reward(agent, sim)
+        
+        # --- 3. 计算开火质量 (Shot Quality) ---
+        # 检查是否在本步执行了发射指令
+        my_action = action_dict.get(agent.uid)
+        if isinstance(my_action, dict) and my_action.get('fire_target'):
+            target_uid = my_action['fire_target']
+            target = sim.get_entity(target_uid)
+            
+            # 只有当没有重定向发生时，才视为新发射 (Env 已经处理了逻辑，这里再校验一下)
+            # 简单起见，如果 Env 允许了 fire_target 存在，就视为发射了
+            shot_rew = self._calc_shot_quality(agent, target)
+            total_reward += shot_rew
+            
+        # --- 4. 处理事件奖励 (Event Reward) ---
+        # A. 重定向奖励
+        for re in redirection_events:
+            if re['launcher'] == agent.uid:
+                total_reward += self.cfg['redirect_bonus']
+        
+        # B. 击杀奖励 (我是凶手)
+        for e in events:
+            if e['type'] == 'KILL':
+                # 解析 killer uid (可能是 M_Red_0_1 -> Red_0)
+                killer_uid = e['killer']
+                # Env 传来的 killer 可能是导弹ID也可能是发射者ID，具体取决于 sim_core 实现
+                # 假设 Simulation.step 中已经处理好归属，或者这里做一个简单判断
+                if killer_uid == agent.uid or (f"M_{agent.uid}" in killer_uid):
+                    total_reward += self.cfg['kill_bonus']
+
+        return total_reward
+
+    def _calc_position_reward(self, agent, sim):
+        """
+        计算占位优势：
+        1. 角度：我的机头是否指向敌机？
+        2. 距离：是否保持在 20km 左右的舒适区？
+        """
+        # 寻找最近的敌机
         enemies = [e for e in sim.aircrafts if e.team != agent.team and e.is_active]
         if not enemies:
-            return reward + 1.0 # 敌人全灭，给予额外存活奖
-
-        # 3. 寻找最近的敌机 (作为主要关注对象)
-        # 使用 lambda 简化距离计算
+            return 0.0
+            
+        # 找到最近的敌人
         nearest_enemy = min(enemies, key=lambda e: get_distance(agent.pos, e.pos))
         dist = get_distance(agent.pos, nearest_enemy.pos)
         
-        # 计算相对几何关系
+        # A. 指向性奖励 (Align Bonus)
         vec_to_enemy = normalize(nearest_enemy.pos - agent.pos)
-        my_heading = normalize(agent.vel)
-        aim_dot = np.dot(vec_to_enemy, my_heading) # 1.0表示正对
+        my_dir = normalize(agent.vel)
+        align_dot = np.dot(my_dir, vec_to_enemy) # [-1, 1]
         
-        # --- 策略引导核心 ---
-
-        # A. 接近奖励 (Approach): 引导飞向敌人
-        # 只有在射程外才给接近奖励，防止发生碰撞或冲过头
-        if dist > self.engage_cfg["engage_range"]:
-            closing_speed = np.dot(agent.vel, vec_to_enemy)
-            # 归一化：除以音速(约340)，使得输出大致在 [-1, 1] 之间
-            reward += self.reward_cfg["approach_scale"] * (closing_speed / 340.0)
-
-        # B. 角度/瞄准奖励 (Alignment): 只要把机头对准敌人，就给分
-        # 这是为了让飞机学会由“飞向”转变为“咬尾/瞄准”
-        if aim_dot > self.engage_cfg["aim_cos"]:
-            reward += self.reward_cfg["aim_bonus"]
-
-        # C. 完美攻击区 (WEZ) 持续奖励: 这是“占位”的核心
-        # 条件：距离在 WEZ 内，且角度也满足严格的射击条件
-        in_wez_dist = (self.engage_cfg["wez_min"] < dist < self.engage_cfg["wez_max"])
-        in_wez_angle = (aim_dot > self.engage_cfg["shot_cos"])
+        r_align = align_dot * self.cfg['align_bonus']
         
-        if in_wez_dist and in_wez_angle:
-            # 这是一个非常有利的位置，给予高额持续奖励，鼓励智能体保持在这里
-            # 这相当于告诉它：“这里是最佳位置，待在这里别动！”
-            reward += self.reward_cfg["position_bonus"] 
-
-        # --- 4. 开火判定 (Action Evaluation) ---
-        my_action = action_dict.get(agent.uid, {})
-        # 兼容处理：有些地方可能是直接传 int，有些是传 dict
-        if isinstance(my_action, dict):
-            fire_target_uid = my_action.get('fire_target')
+        # B. 距离控制奖励 (Distance Bonus)
+        # 使用高斯函数，在 optimal_dist 处达到峰值
+        sigma = 10000.0
+        r_dist = np.exp(-((dist - self.cfg['optimal_dist'])**2) / (2 * sigma**2)) * self.cfg['dist_bonus']
+        
+        # C. 高度/能量奖励 (Height Bonus)
+        # 鼓励保持在 5000m - 10000m
+        alt = agent.pos[2]
+        r_height = 0.0
+        if 5000 < alt < 12000:
+            r_height = self.cfg['height_bonus']
+        elif alt < 2000:
+            r_height = -0.05 * (self.cfg['height_bonus'] * 100) # 低空惩罚 (稍微放大一点)
             
-            if fire_target_uid:
-                # 获取被攻击的目标对象
-                target = sim.get_entity(fire_target_uid)
-                
-                # 判定射击质量
-                is_valid_shot = False
-                if target and target.is_active:
-                    t_dist = get_distance(agent.pos, target.pos)
-                    t_vec = normalize(target.pos - agent.pos)
-                    t_dot = np.dot(t_vec, my_heading)
-                    
-                    # 严格的判定标准：必须在 WEZ 距离内，且指向误差极小
-                    dist_ok = (self.engage_cfg["wez_min"] <= t_dist <= self.engage_cfg["wez_max"])
-                    angle_ok = (t_dot > self.engage_cfg["shot_cos"])
-                    
-                    if dist_ok and angle_ok:
-                        is_valid_shot = True
+        return r_align + r_dist + r_height
 
-                if is_valid_shot:
-                    # 好射击：给予大奖
-                    reward += self.reward_cfg["good_shot_bonus"]
-                    
-                    # 额外检查：避免重复射击（如果天上已经有我不久前发出的针对该目标的导弹）
-                    # 避免一次性把弹打光，学会节省弹药
-                    active_missiles_at_target = sum(
-                        1 for m in sim.missiles 
-                        if m.launcher_uid == agent.uid and m.target and m.target.uid == fire_target_uid and m.is_active
-                    )
-                    # 如果已经有超过1枚导弹（包含刚发射这枚）在飞向目标，视为冗余
-                    # 注意：step函数里是先生成导弹再算奖励，所以这里至少有1枚
-                    if active_missiles_at_target > 1:
-                        reward += self.reward_cfg["redundant_fire_penalty"]
-                else:
-                    # 坏射击：给予重罚！这是学会“先占位”的关键
-                    # 告诉它：没瞄准好就开火是极其错误的，比不作为还要糟糕
-                    reward += self.reward_cfg["bad_shot_penalty"]
-
-        # 5. 导弹支援奖励 (Missile Support)
-        # 鼓励发射后继续在该方向保持有利态势 (模拟半主动雷达制导需求，或者单纯为了观察战果)
-        for m in sim.missiles:
-            if m.launcher_uid == agent.uid and m.is_active and m.target and m.target.is_active:
-                # 只要有导弹活着并在追踪，每一步给一点点微小的奖励
-                reward += 0.005 
-
-        return reward
+    def _calc_shot_quality(self, agent, target):
+        """
+        评估发射质量：是否在 WEZ 内？
+        """
+        if not target or not target.is_active:
+            return self.cfg['invalid_shot_penalty']
+            
+        dist = get_distance(agent.pos, target.pos)
+        vec_to_target = normalize(target.pos - agent.pos)
+        my_dir = normalize(agent.vel)
+        
+        # 计算偏角 (Off-Boresight Angle)
+        angle = np.arccos(np.clip(np.dot(my_dir, vec_to_target), -1, 1))
+        
+        # 判定条件
+        is_range_ok = self.cfg['wez_min'] < dist < self.cfg['wez_max']
+        is_angle_ok = angle < self.cfg['wez_angle']
+        
+        if is_range_ok and is_angle_ok:
+            return self.cfg['valid_shot_bonus']
+        else:
+            # 距离太远、太近或角度太大，都算乱射
+            return self.cfg['invalid_shot_penalty']

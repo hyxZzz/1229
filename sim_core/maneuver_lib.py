@@ -1,150 +1,53 @@
 import numpy as np
+import math as m
 
 class ManeuverLibrary:
-    """
-    机动动作库：将离散动作ID转换为连续的控制指令
-    Control Cmd Format: {
-        'target_g': float,
-        'target_roll': float,
-        'target_pitch_rate': float,
-        'throttle': float
-    }
-    """
-    # 动作定义
-    ACTION_MAINTAIN = 0  # 保持当前状态
-    ACTION_LEFT_TURN = 1 # 左平转
-    ACTION_RIGHT_TURN = 2 # 右平转
-    ACTION_CLIMB = 3     # 爬升
-    ACTION_DIVE = 4      # 俯冲
-    ACTION_BREAK_LEFT = 5 # 左急转 (高过载)
-    ACTION_BREAK_RIGHT = 6 # 右急转
-    ACTION_PITCH_UP = 7  # 俯仰上仰
-    ACTION_PITCH_DOWN = 8 # 俯仰下压
-    ACTION_NOTCH_LEFT = 9 # 切向机动-左
-    ACTION_NOTCH_RIGHT = 10 # 切向机动-右
-    ACTION_CRANK_LEFT = 11 # 偏置机动-左
-    ACTION_CRANK_RIGHT = 12 # 偏置机动-右
-    ACTION_BARREL_ROLL = 13 # 桶滚
-    ACTION_SLICING_TURN = 14 # 切片转弯
-    ACTION_IMMELMANN = 15 # 半筋斗
-    ACTION_SPLIT_S = 16 # 半滚俯冲
-    ACTION_HIGH_YOYO = 17 # 高 Yo-Yo
-    ACTION_LOW_YOYO = 18 # 低 Yo-Yo
+    # 动作定义: [加速标识, 目标G值, 滚转角(rad), 垂直标识(备用)]
+    # acc_flag: 0=保持, 2=加速, -2=减速
+    # target_g: 目标过载 (G)
+    # roll: 滚转角 (弧度)
+    # flag: -1 通常表示纯垂直面机动 (在此简化模型中主要由 G 和 Roll 决定，可作为参考)
     
+    MANEUVERS = {
+        0: [0, 1, 0, 0],                # 匀速前飞 (Maintain)
+        1: [2, 1, 0, 0],                # 加速前飞 (Accelerate)
+        2: [-2, 1, 0, 0],               # 减速前飞 (Decelerate)
+        3: [0, 2, 0, -1],               # 爬升 (Pull up)
+        4: [0, 0.5, 0, -1],             # 俯冲 (Push down) - 修正: G=0可能导致完全失控，0.5G为适度推杆
+        5: [0, 2, 0.25 * m.pi, -1],     # 左爬升 (Left Climb)
+        6: [0, 2, -0.25 * m.pi, -1],    # 右爬升 (Right Climb)
+        7: [0, 2, -0.75 * m.pi, -1],    # 左俯冲 (Left Dive) - 滚转135度拉杆
+        8: [0, 2, 0.75 * m.pi, -1],     # 右俯冲 (Right Dive)
+        9: [0, 2, m.acos(1 / 2), 0],    # 左转弯 (Left Turn) - 60度滚转 2G = 稳定盘旋
+        10: [0, 2, -m.acos(1 / 2), 0],  # 右转弯 (Right Turn)
+    }
+
+    # 为了兼容 RL 动作空间定义 (0-10)
+    ACTION_MAINTAIN = 0
+    ACTION_ACCEL = 1
+    ACTION_DECEL = 2
+    ACTION_CLIMB = 3
+    ACTION_DIVE = 4
+    ACTION_LEFT_CLIMB = 5
+    ACTION_RIGHT_CLIMB = 6
+    ACTION_LEFT_DIVE = 7
+    ACTION_RIGHT_DIVE = 8
+    ACTION_LEFT_TURN = 9
+    ACTION_RIGHT_TURN = 10
+
     def __init__(self):
         pass
 
-    def _coordinated_turn_g(self, roll_rad: float) -> float:
-        cos_roll = np.cos(roll_rad)
-        if abs(cos_roll) < 1e-3:
-            return 9.0
-        return 1.0 / cos_roll
-
-    def get_action_cmd(self, action_id: int, current_roll: float) -> dict:
-        cmd = {
-            'throttle': 1.0, # 默认巡航油门
-            'target_g': 1.0, # 默认1G平飞
-            'target_roll': 0.0,
-            'target_pitch_rate': 0.0
-        }
+    def get_action_cmd(self, action_id: int) -> dict:
+        """
+        根据 ID 返回具体的机动参数
+        """
+        # 默认返回匀速前飞
+        params = self.MANEUVERS.get(action_id, [0, 1, 0, 0])
         
-        if action_id == self.ACTION_MAINTAIN:
-            cmd['target_roll'] = 0.0
-            cmd['target_g'] = 1.0
-            
-        elif action_id == self.ACTION_LEFT_TURN:
-            cmd['target_roll'] = -np.deg2rad(45)
-            cmd['target_g'] = self._coordinated_turn_g(cmd['target_roll'])
-            
-        elif action_id == self.ACTION_RIGHT_TURN:
-            cmd['target_roll'] = np.deg2rad(45)
-            cmd['target_g'] = self._coordinated_turn_g(cmd['target_roll'])
-            
-        elif action_id == self.ACTION_CLIMB:
-            cmd['target_roll'] = 0.0
-            cmd['target_g'] = 3.0 # 拉起
-            cmd['throttle'] = 1.0 # 爬升加满油
-            
-        elif action_id == self.ACTION_DIVE:
-            cmd['target_roll'] = 0.0
-            cmd['target_g'] = 0.5 # 低过载俯冲
-            cmd['throttle'] = 0.7 # 轻推油门防止超速
-            cmd['target_pitch_rate'] = -np.deg2rad(5)
-            
-        elif action_id == self.ACTION_BREAK_LEFT:
-            cmd['target_roll'] = -np.deg2rad(85) # 几乎垂直
-            cmd['target_g'] = 9.0 # 最大过载
-            cmd['throttle'] = 1.0 # 能量维持
-            cmd['target_pitch_rate'] = np.deg2rad(2)
-            
-        elif action_id == self.ACTION_BREAK_RIGHT:
-            cmd['target_roll'] = np.deg2rad(85)
-            cmd['target_g'] = 9.0
-            cmd['throttle'] = 1.0
-            cmd['target_pitch_rate'] = np.deg2rad(2)
-
-        elif action_id == self.ACTION_PITCH_UP:
-            cmd['target_roll'] = current_roll
-            cmd['target_g'] = 2.5
-            cmd['target_pitch_rate'] = np.deg2rad(6)
-
-        elif action_id == self.ACTION_PITCH_DOWN:
-            cmd['target_roll'] = current_roll
-            cmd['target_g'] = 0.5
-            cmd['target_pitch_rate'] = -np.deg2rad(6)
-
-        elif action_id == self.ACTION_NOTCH_LEFT:
-            cmd['target_roll'] = -np.deg2rad(80)
-            cmd['target_g'] = 6.0
-            cmd['throttle'] = 1.0
-            cmd['target_pitch_rate'] = 0.0
-
-        elif action_id == self.ACTION_NOTCH_RIGHT:
-            cmd['target_roll'] = np.deg2rad(80)
-            cmd['target_g'] = 6.0
-            cmd['throttle'] = 1.0
-            cmd['target_pitch_rate'] = 0.0
-
-        elif action_id == self.ACTION_CRANK_LEFT:
-            cmd['target_roll'] = -np.deg2rad(30)
-            cmd['target_g'] = 2.0
-            cmd['throttle'] = 0.9
-
-        elif action_id == self.ACTION_CRANK_RIGHT:
-            cmd['target_roll'] = np.deg2rad(30)
-            cmd['target_g'] = 2.0
-            cmd['throttle'] = 0.9
-
-        elif action_id == self.ACTION_BARREL_ROLL:
-            cmd['target_roll'] = np.deg2rad(170)
-            cmd['target_g'] = 1.5
-            cmd['target_pitch_rate'] = np.deg2rad(3)
-
-        elif action_id == self.ACTION_SLICING_TURN:
-            cmd['target_roll'] = np.deg2rad(70)
-            cmd['target_g'] = 1.2
-            cmd['target_pitch_rate'] = -np.deg2rad(2)
-
-        elif action_id == self.ACTION_IMMELMANN:
-            cmd['target_roll'] = 0.0
-            cmd['target_g'] = 4.0
-            cmd['throttle'] = 1.0
-            cmd['target_pitch_rate'] = np.deg2rad(10)
-
-        elif action_id == self.ACTION_SPLIT_S:
-            cmd['target_roll'] = np.deg2rad(180)
-            cmd['target_g'] = 2.5
-            cmd['throttle'] = 0.8
-            cmd['target_pitch_rate'] = -np.deg2rad(8)
-
-        elif action_id == self.ACTION_HIGH_YOYO:
-            cmd['target_roll'] = np.deg2rad(50)
-            cmd['target_g'] = 2.0
-            cmd['target_pitch_rate'] = np.deg2rad(5)
-
-        elif action_id == self.ACTION_LOW_YOYO:
-            cmd['target_roll'] = np.deg2rad(50)
-            cmd['target_g'] = 1.2
-            cmd['target_pitch_rate'] = -np.deg2rad(5)
-            
-        return cmd
+        return {
+            'acc_flag': params[0],
+            'target_g': params[1],
+            'target_roll': params[2],
+            'flag': params[3]
+        }

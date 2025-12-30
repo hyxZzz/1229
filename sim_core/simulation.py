@@ -18,25 +18,30 @@ class Simulation:
         self.entity_map = {}
         self.time = 0.0
 
+        # === [修复] 默认高度范围 (无论是否有 init_state 都需要) ===
+        alt_min, alt_max = 8000, 12000
+
         if init_state:
             red_center = init_state.get("red_center", [-20000, 0, 8000])
             blue_center = init_state.get("blue_center", [20000, 0, 8000])
             spread_range = init_state.get("spread_range", 28000)
             spacing = spread_range / max(1, (8 - 1))
             center_offset = init_state.get("center_offset", [0.0, 0.0, 0.0])
-            pos_noise_range = init_state.get("pos_noise_range", 0.0)
-            heading_noise_deg = init_state.get("heading_noise_deg", 0.0)
+            pos_noise_range = init_state.get("pos_noise_range", 2000.0)
+            heading_noise_deg = init_state.get("heading_noise_deg", 10.0)
         else:
             red_center = [-20000, 0, 8000]
             blue_center = [20000, 0, 8000]
             spacing = 4000
+            
+            # === [修改] 增大随机性 (仅在无 init_state 时覆盖默认值) ===
             center_offset = [
-                np.random.uniform(-2000.0, 2000.0),
-                np.random.uniform(-2000.0, 2000.0),
-                np.random.uniform(-2000.0, 2000.0),
+                np.random.uniform(-5000, 5000),
+                np.random.uniform(-5000, 5000),
+                np.random.uniform(-2000, 2000),
             ]
-            pos_noise_range = 500.0
-            heading_noise_deg = 15.0
+            pos_noise_range = 3000.0
+            heading_noise_deg = 45.0
 
         red_center = [
             red_center[0] + center_offset[0],
@@ -51,17 +56,19 @@ class Simulation:
         heading_noise_rad = np.deg2rad(heading_noise_deg)
         
         # --- 红方 (Team 0) ---
-        # 阵型：一字排开，间隔 4km，高度 8000m
         for i in range(8):
             uid = f"Red_{i}"
-            # X=-50km (左侧), Y分散, Z=8000
             pos_noise = np.random.uniform(-pos_noise_range, pos_noise_range, 3)
+            
+            # 使用 alt_min/alt_max 随机生成高度，覆盖原有的 Z 轴逻辑
+            rand_alt = np.random.uniform(alt_min, alt_max)
+            
             pos = [
                 red_center[0] + pos_noise[0],
                 red_center[1] + (i - 3.5) * spacing + pos_noise[1],
-                red_center[2] + pos_noise[2],
+                rand_alt, # [修改] 强制使用随机高度
             ]
-            heading = np.random.uniform(-heading_noise_rad, heading_noise_rad)
+            heading = 0.0 + np.random.uniform(-heading_noise_rad, heading_noise_rad)
             speed = np.random.uniform(280, 320) # 随机速度
             vel = [speed * np.cos(heading), speed * np.sin(heading), 0]
             p = Aircraft(uid, 0, pos, vel, init_heading=heading)
@@ -69,15 +76,17 @@ class Simulation:
             self.entity_map[uid] = p
             
         # --- 蓝方 (Team 1) ---
-        # 阵型：一字排开，与红方对峙
         for i in range(8):
             uid = f"Blue_{i}"
-            # X=+50km (右侧), Y分散
             pos_noise = np.random.uniform(-pos_noise_range, pos_noise_range, 3)
+            
+            # 蓝方也应用同样的高度随机逻辑
+            rand_alt = np.random.uniform(alt_min, alt_max)
+            
             pos = [
                 blue_center[0] + pos_noise[0],
                 blue_center[1] + (i - 3.5) * spacing + pos_noise[1],
-                blue_center[2] + pos_noise[2],
+                rand_alt, # [修改] 强制使用随机高度
             ]
             heading = np.pi + np.random.uniform(-heading_noise_rad, heading_noise_rad)
             speed = np.random.uniform(280, 320) # 随机速度
@@ -131,8 +140,7 @@ class Simulation:
                     m_uid = f"M_{p.uid}_{3-p.missile_count}"
                     new_missile = Missile(m_uid, p.team, p, target)
                     self.missiles.append(new_missile)
-                    events.append({'type': 'FIRE', 'launcher': p.uid})
-                    # print(f"[t={self.time:.1f}] 🚀 {p.uid} FIRED at {target.uid}!")
+                    events.append({'type': 'FIRE', 'launcher': p.uid,'target': target.uid})
 
         # 2. 导弹更新
         # 收集所有活着的敌机作为潜在重规划目标
@@ -149,6 +157,5 @@ class Simulation:
             
             if hit:
                 events.append({'type': 'KILL', 'killer': m.launcher_uid, 'victim': hit_uid})
-                # print(f"[t={self.time:.1f}] 💥 {m.launcher_uid} KILLED {hit_uid}!")
 
         return events

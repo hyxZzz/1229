@@ -6,8 +6,8 @@ class PolicyHead(nn.Module):
     def __init__(self, input_dim, action_dims):
         super().__init__()
         
-        # 1. 飞行机动策略 (Discrete 7)
-        # Cruise, Max_G, Zoom, Split_S, Barrel, Snake, YoYo
+        # 1. 飞行机动策略 (Discrete 11)
+        # 0-10: Maintain, Accel, Decel, Climb, Dive, L_Climb, R_Climb, L_Dive, R_Dive, L_Turn, R_Turn
         self.maneuver_net = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -23,15 +23,21 @@ class PolicyHead(nn.Module):
         )
         self.apply(self._init_weights)
 
+        # === [核心修改] 强制设置“不开火”的 Bias ===
+        # 索引 8 对应“不开火”节点。
+        # 给它一个大的正 Bias (例如 +5.0)，使其初始 Logit 远大于其他节点。
+        # 这样 Softmax 后的概率会接近 99% 选择“不开火”。
+        with torch.no_grad():
+            self.target_net[-1].bias[8].fill_(5.0) 
+
         
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # 使用正交初始化，增益设为 0.01 (非常小)
-            # 这会让输出的 Logits 非常接近 0，从而使 Softmax 后的概率接近均匀分布
+            # 使用正交初始化
             nn.init.orthogonal_(m.weight, gain=0.01)
             nn.init.constant_(m.bias, 0)
         
-    def forward(self, x, masking_info=None):  # <--- 修改这里：参数名必须是 masking_info
+    def forward(self, x, masking_info=None):
         """
         x: 全局特征向量
         masking_info: (Batch, 8) 1=Alive, 0=Dead. 用于屏蔽已死亡的敌机

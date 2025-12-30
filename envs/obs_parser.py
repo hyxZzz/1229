@@ -8,14 +8,14 @@ class ObservationParser:
         self.max_missiles = max_missiles
         
         # 归一化常数定义 (基于 env_config.yaml)
-        # 地图范围 +/- 150,000 -> 设为 150,000
-        self.NORM_POS = 150000.0  
-        # 相对距离关注 100km (雷达范围) -> 设为 100,000 比较合适
-        self.NORM_REL_POS = 100000.0
-        # 高度上限 25,000 -> 设为 30,000
-        self.NORM_ALT = 30000.0
-        # 最大速度约 600m/s -> 设为 1000
-        self.NORM_VEL = 1000.0
+        # 地图范围 +/- 80,000 -> 设为 80,000
+        self.NORM_POS = 80000.0  
+        # 相对距离关注 60km (雷达范围) -> 设为 60,000 比较合适
+        self.NORM_REL_POS = 60000.0
+        # 高度上限 25,000 -> 设为 20000
+        self.NORM_ALT = 20000.0
+        # 最大速度约 600m/s 
+        self.NORM_VEL = 600.0
         
     def get_obs(self, sim, agent):
         """
@@ -54,16 +54,22 @@ class ObservationParser:
                 idx += 1
         
         # 3. 敌机特征
-        enemies_feat = np.zeros((self.max_enemies, 7), dtype=np.float32)
-        idx = 0
+        enemies_list = []
         for other in sim.aircrafts:
-            if other.team != agent.team:
-                if idx >= self.max_enemies: break
-                if other.is_active:
-                    rel_pos = (other.pos - agent.pos) / self.NORM_REL_POS
-                    rel_vel = (other.vel - agent.vel) / self.NORM_VEL
-                    enemies_feat[idx] = [*rel_pos, *rel_vel, 1.0]
-                idx += 1
+            if other.team != agent.team and other.is_active:
+                dist = get_distance(agent.pos, other.pos) # 需 import get_distance
+                enemies_list.append((dist, other))
+        
+        # 按距离从小到大排序
+        enemies_list.sort(key=lambda x: x[0])
+        
+        enemies_feat = np.zeros((self.max_enemies, 7), dtype=np.float32)
+        for idx, (dist, other) in enumerate(enemies_list):
+            if idx >= self.max_enemies: break
+            
+            rel_pos = (other.pos - agent.pos) / self.NORM_REL_POS
+            rel_vel = (other.vel - agent.vel) / self.NORM_VEL
+            enemies_feat[idx] = [*rel_pos, *rel_vel, 1.0]
 
         # 4. 导弹特征
         missiles_feat = np.zeros((self.max_missiles, 7), dtype=np.float32)
