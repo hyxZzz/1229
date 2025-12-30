@@ -33,6 +33,11 @@ class Missile(Entity):
         self.lost_lock = False      # 是否丢失目标（供 Env 识别）
         self.max_speed = 1200.0     # 极速限制 (m/s) ~ Mach 4
         self.min_speed = 100.0      # 失速速度
+        self.seeker_memory = 2.0   # 目标丢失后的惯导记忆时间 (s)
+        self.terminal_range = 5000.0  # 末段强制追踪距离 (m)
+        self.last_seen_pos = target.pos.copy()
+        self.last_seen_vel = target.vel.copy()
+        self.last_lock_time = 0.0
 
     def update(self, dt, enemies=None):
         """
@@ -47,17 +52,24 @@ class Missile(Entity):
         prev_pos = self.pos.copy()
         
         # 1. 目标有效性检查
-        if self.target is None or (not self.target.is_active):
+        target_valid = self.target is not None and self.target.is_active
+        dist_to_target = None
+        if not target_valid:
             self.lost_lock = True
         else:
+            r_vec = self.target.pos - self.pos
+            dist_to_target = np.linalg.norm(r_vec)
             # 检查视场角 (FOV)
             my_dir = normalize(self.vel)
-            vec_to_target = normalize(self.target.pos - self.pos)
+            vec_to_target = normalize(r_vec)
             angle = np.arccos(np.clip(np.dot(my_dir, vec_to_target), -1, 1))
-            if angle > self.fov:
-                self.lost_lock = True
-            else:
+            if angle <= self.fov or (dist_to_target is not None and dist_to_target <= self.terminal_range):
                 self.lost_lock = False
+                self.last_seen_pos = self.target.pos.copy()
+                self.last_seen_vel = self.target.vel.copy()
+                self.last_lock_time = self.time_alive
+            else:
+                self.lost_lock = True
 
         # 2. 计算动力 (Thrust)
         acc_thrust = 0.0
@@ -74,22 +86,34 @@ class Missile(Entity):
         # 3. 计算导引过载 (Guidance Load)
         acc_guide = np.zeros(3)
         
-        if not self.lost_lock:
+        if target_valid:
             # === 比例导引 (PN) ===
-            r_vec = self.target.pos - self.pos
-            dist = np.linalg.norm(r_vec)
-            r_dir = r_vec / (dist + 1e-6)
-            
-            v_rel = self.target.vel - self.vel
-            vc = -np.dot(v_rel, r_dir)
-            omega = np.cross(r_vec, v_rel) / (dist**2 + 1e-6)
-            
-            acc_magnitude = self.N_pn * vc * np.linalg.norm(omega)
-            acc_magnitude = np.clip(acc_magnitude, -self.max_g * 9.81, self.max_g * 9.81)
-            
-            cmd_vec = np.cross(omega, self.vel)
-            if np.linalg.norm(cmd_vec) > 1e-3:
-                acc_guide = normalize(cmd_vec) * acc_magnitude
+            if self.lost_lock and (self.time_alive - self.last_lock_time) <= self.seeker_memory:
+                time_since_lock = self.time_alive - self.last_lock_time
+                guide_pos = self.last_seen_pos + self.last_seen_vel * time_since_lock
+                guide_vel = self.last_seen_vel
+            elif not self.lost_lock:
+                guide_pos = self.target.pos
+                guide_vel = self.target.vel
+            else:
+                guide_pos = None
+                guide_vel = None
+
+            if guide_pos is not None:
+                r_vec = guide_pos - self.pos
+                dist = np.linalg.norm(r_vec)
+                r_dir = r_vec / (dist + 1e-6)
+                
+                v_rel = guide_vel - self.vel
+                vc = -np.dot(v_rel, r_dir)
+                omega = np.cross(r_vec, v_rel) / (dist**2 + 1e-6)
+                
+                acc_magnitude = self.N_pn * vc * np.linalg.norm(omega)
+                acc_magnitude = np.clip(acc_magnitude, -self.max_g * 9.81, self.max_g * 9.81)
+                
+                cmd_vec = np.cross(omega, self.vel)
+                if np.linalg.norm(cmd_vec) > 1e-3:
+                    acc_guide = normalize(cmd_vec) * acc_magnitude
         
         # 4. 简化的空气阻力
         speed = np.linalg.norm(self.vel)
@@ -109,7 +133,7 @@ class Missile(Entity):
             self.vel = normalize(self.vel) * self.max_speed
             
         # 6. 命中判定 (修复版：射线检测防止穿模)
-        if not self.lost_lock:
+        if target_valid and (not self.lost_lock or (dist_to_target is not None and dist_to_target <= self.terminal_range)):
             # A. 计算当前距离
             dist = np.linalg.norm(self.target.pos - self.pos)
             
